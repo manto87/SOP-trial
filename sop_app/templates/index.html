@@ -214,6 +214,26 @@
   .toggle-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: none; color: var(--text2); transition: all .15s; }
   .toggle-btn.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 
+  /* ── E2E Risk Tab ────────────────────────────────────────────────── */
+  .risk-drop-zone { border: 2px dashed var(--border); border-radius: 12px; padding: 48px 32px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s; }
+  .risk-drop-zone:hover, .risk-drop-zone.dragover { border-color: var(--accent); background: rgba(79,142,247,.05); }
+  .risk-drop-zone.loaded { border-color: var(--success); background: rgba(16,185,129,.05); }
+  .risk-col-hint { display: inline-flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 14px; }
+  .risk-col-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 3px 12px; font-size: 11px; font-weight: 600; color: var(--text2); }
+  .risk-col-chip.required { border-color: var(--accent); color: var(--accent); }
+  .risk-flag { display: inline-block; width: 18px; height: 18px; border-radius: 50%; font-size: 10px; font-weight: 700; line-height: 18px; text-align: center; }
+  .risk-flag-on  { background: rgba(239,68,68,.2); color: var(--danger); }
+  .risk-flag-off { background: var(--surface2); color: var(--text3); }
+  .risk-score-3 { color: var(--danger); font-weight: 700; }
+  .risk-score-2 { color: var(--danger); }
+  .risk-score-1 { color: var(--warning); }
+  .risk-score-0 { color: var(--text3); }
+  .badge-risk-3 { background: rgba(239,68,68,.2); color: var(--danger); border: 1px solid rgba(239,68,68,.3); font-weight: 700; }
+  .badge-risk-2 { background: rgba(239,68,68,.12); color: var(--danger); }
+  .badge-risk-1 { background: rgba(245,158,11,.15); color: var(--warning); }
+  .badge-risk-0 { background: rgba(100,116,139,.12); color: var(--text3); }
+  .risk-filter-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
   /* SCROLLBAR */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -291,6 +311,7 @@
   <button class="nav-btn" onclick="switchTab('suppliers')">🚚 Suppliers & Risk</button>
   <button class="nav-btn" onclick="switchTab('knowledge')">🧠 Planner Knowledge</button>
   <button class="nav-btn" onclick="switchTab('analytics')">💬 Analytics</button>
+  <button class="nav-btn" onclick="switchTab('risk')">⚠️ E2E Risk</button>
 </div>
 
 <div class="main">
@@ -894,6 +915,108 @@
   </div>
 </div>
 
+<!-- ── E2E Risk Tab ────────────────────────────────────────────────────────── -->
+<div id="tab-risk" class="tab-panel">
+
+  <!-- Upload card -->
+  <div class="card" style="max-width:760px;margin:0 auto 24px">
+    <div class="card-header" style="margin-bottom:16px">
+      <div>
+        <div class="card-title">⚠️ Component Concentration Risk</div>
+        <div class="card-subtitle">Upload 24-month sales data to identify components concentrated on a single customer, product or supplier</div>
+      </div>
+    </div>
+
+    <div id="risk-drop-zone" class="risk-drop-zone"
+         ondragover="event.preventDefault();this.classList.add('dragover')"
+         ondragleave="this.classList.remove('dragover')"
+         ondrop="riskHandleDrop(event)"
+         onclick="document.getElementById('risk-file-input').click()">
+      <div style="font-size:36px;margin-bottom:10px">📂</div>
+      <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:6px">Drop Excel file here or click to browse</div>
+      <div style="font-size:12px;color:var(--text2)">.xlsx format — one row per customer / product / month</div>
+      <div class="risk-col-hint">
+        <span class="risk-col-chip required">customer *</span>
+        <span class="risk-col-chip required">product_id *</span>
+        <span class="risk-col-chip required">month *</span>
+        <span class="risk-col-chip required">quantity *</span>
+        <span class="risk-col-chip">revenue</span>
+      </div>
+    </div>
+    <input type="file" id="risk-file-input" accept=".xlsx,.xls" style="display:none" onchange="riskHandleFileInput(this)">
+
+    <div id="risk-upload-status" style="margin-top:12px;font-size:13px;color:var(--text2);min-height:20px;text-align:center"></div>
+  </div>
+
+  <!-- Results — hidden until file is loaded -->
+  <div id="risk-results" style="display:none">
+
+    <!-- KPI strip -->
+    <div class="kpi-grid" id="risk-kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))"></div>
+
+    <!-- Charts row -->
+    <div class="grid-2" style="margin-bottom:20px">
+      <div class="card">
+        <div class="card-header" style="margin-bottom:12px">
+          <div class="card-title">Top Components by Revenue at Risk</div>
+          <div style="font-size:11px;color:var(--text3)">coloured by risk score</div>
+        </div>
+        <div class="chart-wrap tall"><canvas id="risk-bar-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-header" style="margin-bottom:12px">
+          <div class="card-title">Risk Score Distribution</div>
+          <div style="font-size:11px;color:var(--text3)">components by flag count</div>
+        </div>
+        <div class="chart-wrap tall"><canvas id="risk-dist-chart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Risk table -->
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Component Risk Register</div>
+          <div class="card-subtitle">All components ranked by concentration risk</div>
+        </div>
+        <div class="risk-filter-bar">
+          <label style="font-size:12px;color:var(--text2)">Min score</label>
+          <select id="risk-score-filter" onchange="riskApplyFilter()" style="padding:5px 8px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+            <option value="0">All</option>
+            <option value="1">≥ 1</option>
+            <option value="2" selected>≥ 2</option>
+            <option value="3">3 only (High)</option>
+          </select>
+          <input id="risk-search" type="text" placeholder="Search component…" oninput="riskApplyFilter()"
+            style="padding:5px 10px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);width:180px">
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>Type</th>
+              <th style="text-align:center">Risk Score</th>
+              <th style="text-align:center">Flags</th>
+              <th class="num">Customers</th>
+              <th class="num">FG Products</th>
+              <th class="num">Suppliers</th>
+              <th class="num">Revenue at Risk</th>
+              <th class="num">Lead Time</th>
+              <th class="num">On Hand</th>
+            </tr>
+          </thead>
+          <tbody id="risk-table-body"></tbody>
+        </table>
+      </div>
+      <div id="risk-table-footer" style="font-size:11px;color:var(--text3);padding:10px 0 0;text-align:right"></div>
+    </div>
+
+  </div><!-- /risk-results -->
+</div><!-- /tab-risk -->
+
 </div><!-- /main -->
 
 <!-- ── Floating Chat Bubble ────────────────────────────────────────────────── -->
@@ -996,7 +1119,9 @@ let state = {
   sankeyView: 'revenue',
   suppliersData: null,
   currentRunId: null,
-  charts: {}
+  charts: {},
+  riskInitialized: false,
+  riskData: null,
 };
 
 // ── UTILS ────────────────────────────────────────────────────────────────────
@@ -1034,6 +1159,9 @@ function switchTab(name) {
   if (name === 'analytics') {
     setTimeout(() => document.getElementById('analytics-input').focus(), 50);
     _initAnalyticsBanner();
+  }
+  if (name === 'risk' && !state.riskInitialized) {
+    state.riskInitialized = true;
   }
 }
 
@@ -5479,6 +5607,186 @@ function buildAnalyticsTable(columns, rows) {
 
 function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── E2E Risk Tab ──────────────────────────────────────────────────────────────
+
+function riskHandleDrop(e) {
+  e.preventDefault();
+  document.getElementById('risk-drop-zone').classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) riskProcessFile(file);
+}
+
+function riskHandleFileInput(input) {
+  if (input.files[0]) riskProcessFile(input.files[0]);
+}
+
+async function riskProcessFile(file) {
+  const dz    = document.getElementById('risk-drop-zone');
+  const st    = document.getElementById('risk-upload-status');
+  const res   = document.getElementById('risk-results');
+
+  dz.classList.remove('loaded');
+  res.style.display = 'none';
+  st.style.color = 'var(--accent)';
+  st.textContent  = '⟳ Analysing… this may take a moment';
+
+  const fd = new FormData();
+  fd.append('file', file);
+
+  try {
+    const r    = await fetch('/api/risk/component_exposure', { method: 'POST', body: fd });
+    const data = await r.json();
+
+    if (!data.ok) {
+      st.style.color = 'var(--danger)';
+      st.textContent = '❌ ' + data.message;
+      return;
+    }
+
+    state.riskData = data;
+    const k = data.kpis;
+    st.style.color = 'var(--success)';
+    st.textContent = `✓ ${k.rows_parsed.toLocaleString()} rows loaded · ${k.period_from} → ${k.period_to} · ${k.unique_customers} customers · ${k.unique_fg_products} FG products`;
+    dz.classList.add('loaded');
+    res.style.display = 'block';
+
+    riskRenderKpis(k);
+    riskRenderCharts(data.components);
+    riskApplyFilter();
+
+  } catch (err) {
+    st.style.color = 'var(--danger)';
+    st.textContent = '❌ ' + err.message;
+  }
+}
+
+function riskRenderKpis(k) {
+  const f = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(0)+'K' : n.toLocaleString();
+  document.getElementById('risk-kpi-grid').innerHTML = [
+    { val: k.total_components_analysed, label: 'Components Analysed', cls: 'accent', sub: 'across all BOM levels' },
+    { val: k.high_risk_components,      label: 'High Risk',           cls: k.high_risk_components  > 0 ? 'danger'  : 'success', sub: '3 flags: cust + prod + supplier' },
+    { val: k.medium_risk_components,    label: 'Medium Risk',         cls: k.medium_risk_components > 0 ? 'warning' : 'success', sub: '2 flags' },
+    { val: k.low_risk_components,       label: 'Low Risk',            cls: 'accent', sub: '1 flag' },
+    { val: '€' + f(k.revenue_at_risk_eur), label: 'Revenue at Risk',  cls: k.revenue_at_risk_eur > 0 ? 'danger' : 'success', sub: 'medium & high risk only' },
+    { val: k.unique_customers,          label: 'Customers in File',   cls: 'accent', sub: '' },
+  ].map(d => `<div class="kpi ${d.cls}">
+    <div class="kpi-label">${d.label}</div>
+    <div class="kpi-value">${d.val}</div>
+    ${d.sub ? `<div class="kpi-sub">${d.sub}</div>` : ''}
+  </div>`).join('');
+}
+
+function riskRenderCharts(components) {
+  destroyChart('risk-bar');
+  destroyChart('risk-dist');
+
+  // Bar: top 15 components by revenue at risk
+  const top15 = [...components].sort((a,b) => b.revenue_at_risk - a.revenue_at_risk).slice(0, 15);
+  const scoreColors = ['#64748b', '#f59e0b', '#ef4444', '#dc2626'];
+
+  state.charts['risk-bar'] = new Chart(document.getElementById('risk-bar-chart').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: top15.map(c => c.component_id),
+      datasets: [{
+        data: top15.map(c => c.revenue_at_risk),
+        backgroundColor: top15.map(c => scoreColors[c.risk_score] + 'cc'),
+        borderColor:     top15.map(c => scoreColors[c.risk_score]),
+        borderWidth: 1,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => {
+          const c = top15[ctx.dataIndex];
+          return [`Revenue: €${fmtK(c.revenue_at_risk)}`, `Risk: ${c.risk_score}/3`, `Customers: ${c.customers.slice(0,3).join(', ')}${c.customers.length>3?'…':''}`, `Products: ${c.fg_products.join(', ')}`];
+        }}}
+      },
+      scales: {
+        x: { ticks: { color: '#94a3b8', font:{size:11} }, grid: { display:false } },
+        y: { ticks: { color: '#94a3b8', font:{size:11}, callback: v => v >= 1000 ? fmtK(v) : v }, grid: { color:'rgba(46,52,82,.5)' } }
+      }
+    }
+  });
+
+  // Doughnut: distribution
+  const counts = [0,0,0,0];
+  components.forEach(c => counts[c.risk_score]++);
+  state.charts['risk-dist'] = new Chart(document.getElementById('risk-dist-chart').getContext('2d'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Safe (0)', 'Low (1)', 'Medium (2)', 'High (3)'],
+      datasets: [{ data: counts, backgroundColor: scoreColors, borderWidth: 2, borderColor: '#1a1d27' }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position:'bottom', labels:{ color:'#94a3b8', font:{size:11}, padding:14 } },
+        tooltip: { callbacks: { label: ctx => `${ctx.label}: ${ctx.raw} components` }}
+      }
+    }
+  });
+}
+
+function riskApplyFilter() {
+  if (!state.riskData) return;
+  const minScore = parseInt(document.getElementById('risk-score-filter').value, 10);
+  const search   = (document.getElementById('risk-search').value || '').toLowerCase().trim();
+  const filtered = state.riskData.components.filter(c => {
+    if (c.risk_score < minScore) return false;
+    if (search && !c.component_id.toLowerCase().includes(search) && !c.name.toLowerCase().includes(search)) return false;
+    return true;
+  });
+  riskRenderTable(filtered);
+}
+
+function riskRenderTable(components) {
+  const tbody  = document.getElementById('risk-table-body');
+  const footer = document.getElementById('risk-table-footer');
+
+  if (!components.length) {
+    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text2);padding:40px">No components match the current filter</td></tr>';
+    footer.textContent = '';
+    return;
+  }
+
+  const scoreBadge = s => [
+    `<span class="badge badge-risk-0">0 — Safe</span>`,
+    `<span class="badge badge-risk-1">1 — Low</span>`,
+    `<span class="badge badge-risk-2">2 — Medium</span>`,
+    `<span class="badge badge-risk-3">3 — High</span>`,
+  ][s];
+
+  tbody.innerHTML = components.map(c => {
+    const flagC = `<span class="risk-flag ${c.flag_single_customer ? 'risk-flag-on' : 'risk-flag-off'}" title="Single customer">C</span>`;
+    const flagP = `<span class="risk-flag ${c.flag_single_product  ? 'risk-flag-on' : 'risk-flag-off'}" title="Single FG product">P</span>`;
+    const flagS = `<span class="risk-flag ${c.flag_single_supplier ? 'risk-flag-on' : 'risk-flag-off'}" title="Single supplier">S</span>`;
+
+    const custList = c.customers.slice(0,2).map(escHtml).join(', ') + (c.customers.length > 2 ? ` +${c.customers.length-2}` : '');
+    const prodList = c.fg_products.join(', ');
+    const suppList = c.suppliers.slice(0,2).map(escHtml).join(', ') + (c.suppliers.length > 2 ? ` +${c.suppliers.length-2}` : '');
+
+    return `<tr>
+      <td><code style="font-size:11px;color:var(--text2)">${escHtml(c.component_id)}</code></td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(c.name)}">${escHtml(c.name)}</td>
+      <td><span class="badge ${c.make_buy==='buy' ? 'badge-warn' : 'badge-info'}">${c.make_buy}</span></td>
+      <td style="text-align:center">${scoreBadge(c.risk_score)}</td>
+      <td style="text-align:center;display:flex;gap:3px;justify-content:center;padding-top:12px">${flagC}${flagP}${flagS}</td>
+      <td class="num">${c.n_customers}<br><small style="color:var(--text3);font-size:10px">${custList}</small></td>
+      <td class="num">${c.n_fg_products}<br><small style="color:var(--text3);font-size:10px">${escHtml(prodList)}</small></td>
+      <td class="num">${c.n_suppliers > 0 ? c.n_suppliers : '—'}<br><small style="color:var(--text3);font-size:10px">${escHtml(suppList)}</small></td>
+      <td class="num" style="color:${c.risk_score>=2?'var(--danger)':'var(--text)'}">€${fmtK(c.revenue_at_risk)}</td>
+      <td class="num">${c.lead_time_days != null ? c.lead_time_days + ' d' : '—'}</td>
+      <td class="num">${Math.round(c.inventory_on_hand).toLocaleString()}</td>
+    </tr>`;
+  }).join('');
+
+  footer.textContent = `Showing ${components.length} component${components.length!==1?'s':''}`;
 }
 
 </script>
