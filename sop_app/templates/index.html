@@ -520,6 +520,7 @@
     <button class="cap-view-btn active" id="bom-mode-structure" onclick="setBomMode('structure')">🌳 Structure</button>
     <button class="cap-view-btn" id="bom-mode-shortage" onclick="setBomMode('shortage')">⚠ Shortage Impact</button>
     <button class="cap-view-btn" id="bom-mode-peg" onclick="setBomMode('peg')">📦 Build Peg</button>
+    <button class="cap-view-btn" id="bom-mode-import" onclick="setBomMode('import')">📥 Import BOM</button>
     <span id="bom-mode-hint" style="font-size:11px;color:var(--text3);margin-left:8px">Explore BOM structure and plan data</span>
   </div>
 
@@ -565,6 +566,103 @@
       </div>
       <!-- Impact list -->
       <div id="shortage-impact-list"></div>
+    </div>
+  </div>
+
+  <!-- ── Import BOM mode ────────────────────────────────────────────── -->
+  <div id="bom-panel-import" style="display:none">
+
+    <div class="grid-2" style="align-items:start">
+
+      <!-- Left: upload + options -->
+      <div class="card">
+        <div class="card-header" style="margin-bottom:16px">
+          <div>
+            <div class="card-title">📥 Import BOM da Excel</div>
+            <div class="card-subtitle">Sostituisce o integra le righe esistenti nella tabella bill_of_materials</div>
+          </div>
+          <a href="/api/bom/export" class="btn btn-secondary btn-sm" style="text-decoration:none">⬇ Esporta BOM attuale</a>
+        </div>
+
+        <!-- Drop zone -->
+        <div id="bom-import-dropzone" class="risk-drop-zone"
+             ondragover="event.preventDefault();this.classList.add('dragover')"
+             ondragleave="this.classList.remove('dragover')"
+             ondrop="bomImportDrop(event)"
+             onclick="document.getElementById('bom-import-file').click()">
+          <div style="font-size:32px;margin-bottom:8px">📂</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">Drop Excel o clicca per sfogliare</div>
+          <div style="font-size:12px;color:var(--text2)">Formato .xlsx — colonne: <code>parent_id</code>, <code>child_id</code>, <code>quantity</code> [, <code>bom_level</code>]</div>
+        </div>
+        <input type="file" id="bom-import-file" accept=".xlsx,.xls" style="display:none" onchange="bomImportPickFile(this)">
+
+        <!-- Mode selector -->
+        <div style="margin-top:20px">
+          <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px">Modalità di import</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)" id="bom-mode-label-replace_products">
+              <input type="radio" name="bom-import-mode" value="replace_products" checked style="margin-top:2px;accent-color:var(--accent)">
+              <div>
+                <div style="font-size:13px;font-weight:600;color:var(--text)">Replace Products <span class="badge badge-info" style="font-size:10px">consigliato</span></div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">Elimina e riscrive solo i parent_id presenti nel file. Gli altri rimangono intatti.</div>
+              </div>
+            </label>
+            <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)" id="bom-mode-label-merge">
+              <input type="radio" name="bom-import-mode" value="merge" style="margin-top:2px;accent-color:var(--accent)">
+              <div>
+                <div style="font-size:13px;font-weight:600;color:var(--text)">Merge</div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">Aggiorna solo i legami (parent, child) presenti nel file. Gli altri restano.</div>
+              </div>
+            </label>
+            <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)" id="bom-mode-label-replace_all">
+              <input type="radio" name="bom-import-mode" value="replace_all" style="margin-top:2px;accent-color:var(--accent)">
+              <div>
+                <div style="font-size:13px;font-weight:600;color:var(--text)">Replace All <span class="badge badge-danger" style="font-size:10px">distruttivo</span></div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">Svuota l'intera tabella BOM e la ricostruisce dal file.</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Status line -->
+        <div id="bom-import-status" style="margin-top:16px;font-size:13px;min-height:20px;color:var(--text2)"></div>
+
+        <!-- Confirm button (hidden until preview ok) -->
+        <button id="bom-import-confirm-btn" onclick="bomImportConfirm()"
+                style="display:none;margin-top:16px;width:100%"
+                class="btn btn-primary">✓ Conferma Import</button>
+      </div>
+
+      <!-- Right: preview + warnings -->
+      <div>
+        <div class="card" id="bom-import-preview-card" style="display:none">
+          <div class="card-header" style="margin-bottom:12px">
+            <div class="card-title">Anteprima</div>
+            <div id="bom-import-preview-stats" style="font-size:12px;color:var(--text2)"></div>
+          </div>
+
+          <!-- Warnings/errors -->
+          <div id="bom-import-messages" style="margin-bottom:12px"></div>
+
+          <!-- Preview table -->
+          <div class="table-wrap" style="max-height:360px;overflow-y:auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>parent_id</th>
+                  <th>child_id</th>
+                  <th class="num">quantity</th>
+                  <th class="num">bom_level</th>
+                  <th style="font-size:10px;color:var(--text3)">fonte livello</th>
+                </tr>
+              </thead>
+              <tbody id="bom-import-preview-body"></tbody>
+            </table>
+          </div>
+          <div id="bom-import-preview-more" style="font-size:11px;color:var(--text3);margin-top:8px;text-align:right"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -2903,16 +3001,17 @@ function showBOMPlan(itemId, itemName, e) {
 // ── BOM MODE TOGGLE ──────────────────────────────────────────────────────────
 
 function setBomMode(mode) {
-  ['structure','shortage','peg'].forEach(m => {
+  ['structure','shortage','peg','import'].forEach(m => {
     document.getElementById(`bom-panel-${m}`).style.display = m === mode ? '' : 'none';
     document.getElementById(`bom-mode-${m}`).classList.toggle('active', m === mode);
   });
   const hints = {
     structure: 'Explore BOM structure and plan data',
-    shortage: 'See which components are short and which FGs are affected',
-    peg: 'Enter a production quantity and date to trace exact material requirements',
+    shortage:  'See which components are short and which FGs are affected',
+    peg:       'Enter a production quantity and date to trace exact material requirements',
+    import:    'Upload Excel to add or replace BOM rows — bom_level auto-calculated',
   };
-  document.getElementById('bom-mode-hint').textContent = hints[mode];
+  document.getElementById('bom-mode-hint').textContent = hints[mode] || '';
   if (mode === 'shortage') loadShortageImpact();
   if (mode === 'peg') initBuildPeg();
 }
@@ -5607,6 +5706,163 @@ function buildAnalyticsTable(columns, rows) {
 
 function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── BOM Import ────────────────────────────────────────────────────────────────
+
+let _bomImportParsed = null;  // last preview result
+
+function bomImportDrop(e) {
+  e.preventDefault();
+  document.getElementById('bom-import-dropzone').classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) _bomImportProcess(file);
+}
+
+function bomImportPickFile(input) {
+  if (input.files[0]) _bomImportProcess(input.files[0]);
+}
+
+async function _bomImportProcess(file) {
+  const status  = document.getElementById('bom-import-status');
+  const preview = document.getElementById('bom-import-preview-card');
+  const confirm = document.getElementById('bom-import-confirm-btn');
+  const dz      = document.getElementById('bom-import-dropzone');
+
+  _bomImportParsed = null;
+  preview.style.display = 'none';
+  confirm.style.display = 'none';
+  dz.classList.remove('loaded');
+
+  status.style.color   = 'var(--accent)';
+  status.textContent   = '⟳ Analisi file…';
+
+  const fd = new FormData();
+  fd.append('file', file);
+
+  try {
+    const res  = await fetch('/api/bom/import?preview=1', { method: 'POST', body: fd });
+    const data = await res.json();
+
+    if (!data.ok && !data.rows_valid) {
+      // Hard error (e.g. cycle or unreadable file)
+      status.style.color = 'var(--danger)';
+      status.textContent = '❌ ' + (data.message || 'Errore sconosciuto');
+      return;
+    }
+
+    _bomImportParsed = { file, data };
+    _bomRenderPreview(data);
+
+    if (data.ok) {
+      dz.classList.add('loaded');
+      status.style.color = 'var(--success)';
+      status.textContent = `✓ ${data.rows_valid} righe valide · ${data.rows_warned} con warning · ${data.rows_errored} errori · ${data.levels_computed} livelli calcolati automaticamente`;
+      confirm.style.display = '';
+    } else {
+      status.style.color = 'var(--danger)';
+      status.textContent = '❌ ' + data.message;
+      confirm.style.display = 'none';
+    }
+
+  } catch (err) {
+    status.style.color = 'var(--danger)';
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+function _bomRenderPreview(data) {
+  const card = document.getElementById('bom-import-preview-card');
+  const stats = document.getElementById('bom-import-preview-stats');
+  const msgs  = document.getElementById('bom-import-messages');
+  const tbody = document.getElementById('bom-import-preview-body');
+  const more  = document.getElementById('bom-import-preview-more');
+
+  card.style.display = '';
+
+  stats.textContent = `${data.rows_valid} righe valide su ${data.rows_parsed} lette`;
+
+  // Errors + warnings
+  let html = '';
+  if (data.errors && data.errors.length) {
+    html += `<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:12px">
+      <div style="font-weight:600;color:var(--danger);margin-bottom:6px">❌ Errori (righe scartate)</div>
+      ${data.errors.slice(0,5).map(e => `<div style="color:var(--text2)">Riga ${e.row}: ${e.msgs.join(' · ')}</div>`).join('')}
+      ${data.errors.length > 5 ? `<div style="color:var(--text3);margin-top:4px">…e altri ${data.errors.length - 5}</div>` : ''}
+    </div>`;
+  }
+  if (data.warnings && data.warnings.length) {
+    html += `<div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:12px">
+      <div style="font-weight:600;color:var(--warning);margin-bottom:6px">⚠ Warning (righe importate comunque)</div>
+      ${data.warnings.slice(0,5).map(w => `<div style="color:var(--text2)">Riga ${w.row}: ${w.msgs.join(' · ')}</div>`).join('')}
+      ${data.warnings.length > 5 ? `<div style="color:var(--text3);margin-top:4px">…e altri ${data.warnings.length - 5}</div>` : ''}
+    </div>`;
+  }
+  if (!html) {
+    html = `<div style="font-size:12px;color:var(--success);margin-bottom:8px">✓ Nessun errore o warning</div>`;
+  }
+  msgs.innerHTML = html;
+
+  // Preview table (first 50)
+  tbody.innerHTML = (data.preview || []).map(r => `<tr>
+    <td><code style="font-size:11px">${escHtml(r.parent_id)}</code></td>
+    <td><code style="font-size:11px">${escHtml(r.child_id)}</code></td>
+    <td class="num">${r.quantity}</td>
+    <td class="num">${r.bom_level}</td>
+    <td style="font-size:10px;color:var(--text3)">${r.bom_level !== undefined ? 'BFS' : 'file'}</td>
+  </tr>`).join('');
+
+  more.textContent = data.preview_total > 50
+    ? `Mostrando prime 50 di ${data.preview_total} righe`
+    : `${data.preview_total} righe totali`;
+}
+
+async function bomImportConfirm() {
+  if (!_bomImportParsed) return;
+
+  const mode   = document.querySelector('input[name="bom-import-mode"]:checked').value;
+  const status = document.getElementById('bom-import-status');
+  const btn    = document.getElementById('bom-import-confirm-btn');
+
+  const modeLabels = {
+    replace_all:      'Sostituisci TUTTA la BOM',
+    replace_products: 'Sostituisci i prodotti del file',
+    merge:            'Merge',
+  };
+  if (!confirm(`Confermi l'import in modalità "${modeLabels[mode]}"?\n\nVerranno scritte ${_bomImportParsed.data.rows_valid} righe nel database.`)) return;
+
+  btn.disabled    = true;
+  btn.textContent = '⟳ Scrittura…';
+  status.style.color  = 'var(--accent)';
+  status.textContent  = '⟳ Scrittura nel database…';
+
+  const fd = new FormData();
+  fd.append('file', _bomImportParsed.file);
+
+  try {
+    const res  = await fetch(`/api/bom/import?mode=${mode}`, { method: 'POST', body: fd });
+    const data = await res.json();
+
+    if (data.ok) {
+      status.style.color = 'var(--success)';
+      status.textContent = `✓ Import completato: ${data.imported} righe scritte in modalità "${modeLabels[mode]}"`;
+      btn.style.display = 'none';
+      document.getElementById('bom-import-dropzone').classList.remove('loaded');
+      _bomImportParsed = null;
+      // Invalidate BOM cache so Navigator reloads
+      state.bomData = null;
+    } else {
+      status.style.color = 'var(--danger)';
+      status.textContent = '❌ ' + data.message;
+      btn.disabled    = false;
+      btn.textContent = '✓ Conferma Import';
+    }
+  } catch (err) {
+    status.style.color = 'var(--danger)';
+    status.textContent = '❌ ' + err.message;
+    btn.disabled    = false;
+    btn.textContent = '✓ Conferma Import';
+  }
 }
 
 // ── E2E Risk Tab ──────────────────────────────────────────────────────────────
