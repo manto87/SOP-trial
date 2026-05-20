@@ -3196,243 +3196,271 @@ def api_bom_import():
 @app.route("/api/risk/component_exposure", methods=["POST"])
 def api_risk_component_exposure():
     """
-    Accept Excel upload (customer | product_id | month | quantity | revenue?),
-    explode BOM recursively, compute per-component concentration risk:
-    single-customer, single-product, single-supplier.
+    Two-file upload:
+      file            — sales data: customer | product_id | month | quantity
+      inventory_file  — inventory:  item_id  | inventory  | safety_stock
+                                  [ unit_cost ] [ supplier ]
+
+    Form param:
+      bom_threshold   — int (default 2): flag components in <= N finished goods
+
+    Risk flags (score 0-2):
+      flag_single_customer : component in products of only 1 customer
+      flag_few_boms        : component in <= bom_threshold FG products
+
+    Impact metric:
+      excess_inventory  = max(0, inventory_on_hand - safety_stock)
+      slow_moving_value = excess_inventory * unit_cost
     """
     try:
         import openpyxl
     except ImportError:
-        return jsonify({"ok": False, "message": "openpyxl not installed — run: pip install openpyxl"}), 500
+        return jsonify({"ok": False, "message": "openpyxl not installed"}), 500
 
+    # ── inputs ────────────────────────────────────────────────────────────────
     if "file" not in request.files:
-        return jsonify({"ok": False, "message": "No file uploaded"}), 400
-    f = request.files["file"]
-    if not f.filename:
-        return jsonify({"ok": False, "message": "Empty filename"}), 400
+        return jsonify({"ok": False, "message": "File vendite mancante (campo 'file')"}), 400
+    if "inventory_file" not in request.files:
+        return jsonify({"ok": False, "message": "File inventario mancante (campo 'inventory_file')"}), 400
 
-    # ── parse Excel ───────────────────────────────────────────────────────────
     try:
+        bom_threshold = int(request.form.get("bom_threshold", 2))
+    except (TypeError, ValueError):
+        bom_threshold = 2
+
+    # ── helper: parse Excel, return (header, row_iterator) ────────────────────
+    def _open_xl(field_name):
+        f = request.files[field_name]
+        if not f.filename:
+            raise ValueError(f"File '{field_name}' vuoto")
         wb = openpyxl.load_workbook(io.BytesIO(f.read()), read_only=True, data_only=True)
         ws = wb.active
-        rows_iter = iter(ws.values)
-    except Exception as e:
-        return jsonify({"ok": False, "message": f"Cannot read Excel file: {e}"}), 400
+        it = iter(ws.values)
+        raw_hdr = list(next(it, []))
+        if not raw_hdr:
+            raise ValueError(f"File '{field_name}' senza header")
+        hdr = [str(c).strip().lower() if c is not None else "" for c in raw_hdr]
+        return hdr, it
 
-    raw_header = list(next(rows_iter, []))
-    if not raw_header:
-        return jsonify({"ok": False, "message": "Excel file appears empty or has no header row"}), 400
-    header = [str(c).strip().lower() if c is not None else "" for c in raw_header]
-
-    def find_col(candidates):
-        for c in candidates:
-            for i, h in enumerate(header):
-                if c in h:
+    def _find(hdr, candidates):
+        for cand in candidates:
+            for i, h in enumerate(hdr):
+                if cand in h:
                     return i
         return None
 
-    col_customer = find_col(["customer", "cust", "client", "cliente", "buyer"])
-    col_product  = find_col(["product_id", "product", "item_id", "item", "sku", "prodott", "fg", "article"])
-    col_month    = find_col(["month", "mese", "period", "date", "data", "anno", "year_month"])
-    col_qty      = find_col(["qty", "quant", "volume", "unit", "pieces", "pcs"])
-    col_revenue  = find_col(["revenue", "ricav", "sales", "amount", "value", "fattur", "eur", "price"])
+    # ── parse sales file ──────────────────────────────────────────────────────
+    try:
+        sh, sit = _open_xl("file")
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"File vendite: {e}"}), 400
 
-    missing = [name for name, col in [("customer", col_customer), ("product_id", col_product),
-                                       ("month", col_month), ("quantity", col_qty)] if col is None]
-    if missing:
-        return jsonify({
-            "ok": False,
-            "message": f"Could not detect columns: {', '.join(missing)}. "
-                       f"Headers found: {', '.join(header or ['(none)'])}. "
-                       f"Expected: customer, product_id, month (YYYY-MM), quantity, revenue (optional)."
-        }), 400
+    sc_cust = _find(sh, ["customer", "cust", "client", "cliente", "buyer"])
+    sc_prod = _find(sh, ["product_id", "product", "item_id", "sku", "prodott", "fg", "article"])
+    sc_mon  = _find(sh, ["month", "mese", "period", "date", "data", "year_month"])
+    sc_qty  = _find(sh, ["qty", "quant", "volume", "unit", "pieces", "pcs"])
 
-    sales_rows = []
-    parse_errors = 0
-    for row in rows_iter:
+    miss = [n for n, c in [("customer", sc_cust), ("product_id", sc_prod),
+                            ("month", sc_mon), ("quantity", sc_qty)] if c is None]
+    if miss:
+        return jsonify({"ok": False,
+                        "message": f"File vendite — colonne non trovate: {', '.join(miss)}. "
+                                   f"Header rilevati: {', '.join(sh)}"}), 400
+
+    sales_rows, sales_errs = [], 0
+    for row in sit:
         try:
-            def _cell(idx):
-                return row[idx] if idx is not None and idx < len(row) else None
-            customer   = str(_cell(col_customer)).strip() if _cell(col_customer) is not None else None
-            product_id = str(_cell(col_product)).strip()  if _cell(col_product)  is not None else None
-            month_raw  = _cell(col_month)
-            qty_raw    = _cell(col_qty)
-            rev_raw    = _cell(col_revenue) if col_revenue is not None else None
-
-            if customer is None or product_id is None or month_raw is None:
+            def _c(i): return row[i] if i is not None and i < len(row) else None
+            cust = str(_c(sc_cust)).strip() if _c(sc_cust) is not None else ""
+            prod = str(_c(sc_prod)).strip()  if _c(sc_prod) is not None else ""
+            mon_r = _c(sc_mon)
+            qty_r = _c(sc_qty)
+            if not cust or not prod or mon_r is None:
                 continue
-            # Normalise month to YYYY-MM
-            if hasattr(month_raw, "strftime"):
-                month = month_raw.strftime("%Y-%m")
-            else:
-                month = str(month_raw).strip()[:7]  # take first 7 chars of "2024-01-01" etc.
-
-            qty     = float(qty_raw)    if qty_raw    is not None else 0.0
-            revenue = float(rev_raw)    if rev_raw    is not None else 0.0
-
-            if customer and product_id and month:
-                sales_rows.append((customer, product_id, month, qty, revenue))
+            mon = mon_r.strftime("%Y-%m") if hasattr(mon_r, "strftime") else str(mon_r).strip()[:7]
+            qty = float(qty_r) if qty_r is not None else 0.0
+            if cust and prod and mon:
+                sales_rows.append((cust, prod, mon, qty))
         except (TypeError, ValueError, IndexError):
-            parse_errors += 1
+            sales_errs += 1
 
     if not sales_rows:
-        return jsonify({"ok": False, "message": "No valid data rows found in file"}), 400
+        return jsonify({"ok": False, "message": "File vendite: nessuna riga valida"}), 400
 
-    # ── load master data from DB ──────────────────────────────────────────────
+    # ── parse inventory file ──────────────────────────────────────────────────
+    try:
+        ih, iit = _open_xl("inventory_file")
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"File inventario: {e}"}), 400
+
+    ic_item = _find(ih, ["item_id", "item", "material", "component", "codice", "code"])
+    ic_inv  = _find(ih, ["inventory", "inv", "on_hand", "stock", "giacenza", "magazzino", "qty"])
+    ic_ss   = _find(ih, ["safety_stock", "safety", "ss", "scorta", "min_stock"])
+    ic_cost = _find(ih, ["unit_cost", "cost", "costo", "price", "prezzo"])
+    ic_supp = _find(ih, ["supplier", "fornitore", "vendor"])
+
+    miss_inv = [n for n, c in [("item_id", ic_item), ("inventory", ic_inv),
+                                ("safety_stock", ic_ss)] if c is None]
+    if miss_inv:
+        return jsonify({"ok": False,
+                        "message": f"File inventario — colonne non trovate: {', '.join(miss_inv)}. "
+                                   f"Header rilevati: {', '.join(ih)}"}), 400
+
+    inv_data = {}   # item_id -> {on_hand, safety_stock, unit_cost, supplier}
+    for row in iit:
+        try:
+            def _ci(i): return row[i] if i is not None and i < len(row) else None
+            item = str(_ci(ic_item)).strip() if _ci(ic_item) is not None else ""
+            if not item:
+                continue
+            on_hand  = float(_ci(ic_inv)) if _ci(ic_inv) is not None else 0.0
+            ss       = float(_ci(ic_ss))  if _ci(ic_ss)  is not None else 0.0
+            cost     = float(_ci(ic_cost)) if ic_cost is not None and _ci(ic_cost) is not None else None
+            supplier = str(_ci(ic_supp)).strip() if ic_supp is not None and _ci(ic_supp) is not None else ""
+            inv_data[item] = {"on_hand": on_hand, "safety_stock": ss,
+                              "unit_cost": cost, "supplier": supplier}
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    if not inv_data:
+        return jsonify({"ok": False, "message": "File inventario: nessuna riga valida"}), 400
+
+    # ── load BOM + unit_cost fallback from DB ─────────────────────────────────
     conn = get_db()
-
     bom_rows = conn.execute("""
         SELECT b.parent_id, b.child_id, b.quantity,
-               COALESCE(m.make_buy, 'make') as make_buy,
                COALESCE(p.name, m.name) as name,
                CASE WHEN p.product_id IS NOT NULL THEN 'fg'
                     ELSE COALESCE(m.material_type, 'component') END as item_type,
-               COALESCE(m.lead_time_days, p.lead_time_days) as lead_time_days,
-               COALESCE(m.unit_cost, p.unit_price, 0) as unit_cost
+               COALESCE(m.unit_cost, p.unit_price, 0) as db_unit_cost
         FROM bill_of_materials b
         LEFT JOIN products p ON p.product_id = b.child_id
         LEFT JOIN materials m ON m.material_id = b.child_id
     """).fetchall()
+    conn.close()
+
+    db_unit_cost = {r["child_id"]: r["db_unit_cost"] for r in bom_rows}
 
     bom_dict = defaultdict(list)
     for r in bom_rows:
         bom_dict[r["parent_id"]].append({
-            "child_id":        r["child_id"],
-            "qty":             r["quantity"],
-            "make_buy":        r["make_buy"],
-            "name":            r["name"],
-            "item_type":       r["item_type"],
-            "lead_time_days":  r["lead_time_days"],
-            "unit_cost":       r["unit_cost"],
+            "child_id":    r["child_id"],
+            "qty":         r["quantity"],
+            "name":        r["name"],
+            "item_type":   r["item_type"],
         })
-
-    sup_count_rows = conn.execute("""
-        SELECT material_id, COUNT(DISTINCT supplier_id) as n
-        FROM material_supplier_mapping GROUP BY material_id
-    """).fetchall()
-    supplier_count = {r["material_id"]: r["n"] for r in sup_count_rows}
-
-    sup_name_rows = conn.execute("""
-        SELECT msm.material_id, s.name as supplier_name
-        FROM material_supplier_mapping msm
-        JOIN suppliers s ON s.supplier_id = msm.supplier_id
-        ORDER BY msm.material_id, msm.supplier_priority
-    """).fetchall()
-    supplier_names = defaultdict(list)
-    for r in sup_name_rows:
-        supplier_names[r["material_id"]].append(r["supplier_name"])
-
-    inv_rows = conn.execute("""
-        SELECT item_id, SUM(quantity_on_hand) as qty FROM inventory GROUP BY item_id
-    """).fetchall()
-    inventory = {r["item_id"]: r["qty"] for r in inv_rows}
-
-    conn.close()
 
     # ── recursive BOM explosion ───────────────────────────────────────────────
-    def explode_bom(item_id, multiplier=1.0, visited=None):
-        if visited is None:
-            visited = set()
-        if item_id in visited:
-            return {}
+    def explode_bom(item_id, mult=1.0, visited=None):
+        if visited is None: visited = set()
+        if item_id in visited: return {}
         visited = visited | {item_id}
         result = {}
-        for child in bom_dict.get(item_id, []):
-            cid      = child["child_id"]
-            eff_qty  = child["qty"] * multiplier
+        for ch in bom_dict.get(item_id, []):
+            cid = ch["child_id"]
+            eq  = ch["qty"] * mult
             if cid in result:
-                result[cid]["effective_qty"] += eff_qty
+                result[cid]["effective_qty"] += eq
             else:
-                result[cid] = {**child, "effective_qty": eff_qty}
-            # Merge descendants
-            for dcid, ddata in explode_bom(cid, eff_qty, visited).items():
+                result[cid] = {**ch, "effective_qty": eq}
+            for dcid, dd in explode_bom(cid, eq, visited).items():
                 if dcid in result:
-                    result[dcid]["effective_qty"] += ddata["effective_qty"]
+                    result[dcid]["effective_qty"] += dd["effective_qty"]
                 else:
-                    result[dcid] = ddata
+                    result[dcid] = dd
         return result
 
-    bom_cache = {}
-    for fg_id in {row[1] for row in sales_rows}:
-        bom_cache[fg_id] = explode_bom(fg_id)
+    bom_cache = {fg: explode_bom(fg) for fg in {r[1] for r in sales_rows}}
 
     # ── aggregate per component ───────────────────────────────────────────────
-    comp_customers   = defaultdict(set)
-    comp_fg_products = defaultdict(set)
-    comp_revenue     = defaultdict(float)
-    comp_qty         = defaultdict(float)
-    comp_meta        = {}
+    comp_customers = defaultdict(set)
+    comp_fg_prods  = defaultdict(set)
+    comp_qty_total = defaultdict(float)
+    comp_meta      = {}
 
-    for customer, product_id, month, qty, revenue in sales_rows:
-        for comp_id, comp_data in bom_cache.get(product_id, {}).items():
-            comp_customers[comp_id].add(customer)
-            comp_fg_products[comp_id].add(product_id)
-            comp_revenue[comp_id]   += revenue
-            comp_qty[comp_id]       += qty * comp_data["effective_qty"]
-            if comp_id not in comp_meta:
-                comp_meta[comp_id] = {k: comp_data[k] for k in
-                                      ("name", "make_buy", "item_type", "lead_time_days", "unit_cost")}
+    for cust, prod, mon, qty in sales_rows:
+        for cid, cdata in bom_cache.get(prod, {}).items():
+            comp_customers[cid].add(cust)
+            comp_fg_prods[cid].add(prod)
+            comp_qty_total[cid] += qty * cdata["effective_qty"]
+            if cid not in comp_meta:
+                comp_meta[cid] = {"name": cdata["name"], "item_type": cdata["item_type"]}
 
     if not comp_customers:
-        unique_products = sorted({row[1] for row in sales_rows})
-        return jsonify({
-            "ok": False,
-            "message": f"No BOM matches found for products: {', '.join(unique_products)}. "
-                       f"Verify product_id values match DB codes (e.g. FG001–FG010)."
-        }), 400
+        prods = sorted({r[1] for r in sales_rows})
+        return jsonify({"ok": False,
+                        "message": f"Nessuna corrispondenza BOM per i prodotti: {', '.join(prods)}. "
+                                   f"Verificare che i product_id corrispondano ai codici DB (FG001–FG010)."}), 400
 
-    # ── build risk table ──────────────────────────────────────────────────────
+    # ── build results ─────────────────────────────────────────────────────────
+    months_in_file = sorted({r[2] for r in sales_rows})
+    n_months       = max(len(months_in_file), 1)
+
     results = []
-    for comp_id in comp_customers:
-        meta   = comp_meta[comp_id]
-        n_cust = len(comp_customers[comp_id])
-        n_prod = len(comp_fg_products[comp_id])
-        n_supp = supplier_count.get(comp_id, 0)
+    for cid in comp_customers:
+        meta   = comp_meta[cid]
+        n_cust = len(comp_customers[cid])
+        n_prod = len(comp_fg_prods[cid])
+        qty_tot = comp_qty_total[cid]
 
-        flag_single_customer = n_cust == 1
-        flag_single_product  = n_prod == 1
-        flag_single_supplier = (meta["make_buy"] == "buy") and (n_supp <= 1)
-        risk_score = int(flag_single_customer) + int(flag_single_product) + int(flag_single_supplier)
+        flag_single_customer = (n_cust <= 1)
+        flag_few_boms        = (n_prod <= bom_threshold)
+        risk_score           = int(flag_single_customer) + int(flag_few_boms)
+
+        inv   = inv_data.get(cid, {})
+        on_hand      = inv.get("on_hand", 0.0)
+        safety_stock = inv.get("safety_stock", 0.0)
+        excess       = max(0.0, on_hand - safety_stock)
+
+        # unit_cost: file first, then DB
+        unit_cost = inv.get("unit_cost")
+        if unit_cost is None:
+            unit_cost = db_unit_cost.get(cid, 0) or 0
+
+        slow_moving_value = round(excess * unit_cost, 0)
+        avg_monthly = qty_tot / n_months
+        months_coverage = round(on_hand / avg_monthly, 1) if avg_monthly > 0 else None
 
         results.append({
-            "component_id":         comp_id,
-            "name":                 meta["name"] or comp_id,
-            "item_type":            meta["item_type"],
-            "make_buy":             meta["make_buy"],
-            "lead_time_days":       meta["lead_time_days"],
-            "unit_cost":            meta["unit_cost"],
-            "inventory_on_hand":    inventory.get(comp_id, 0),
-            "n_customers":          n_cust,
-            "customers":            sorted(comp_customers[comp_id]),
-            "n_fg_products":        n_prod,
-            "fg_products":          sorted(comp_fg_products[comp_id]),
-            "n_suppliers":          n_supp,
-            "suppliers":            supplier_names.get(comp_id, []),
-            "revenue_at_risk":      round(comp_revenue[comp_id], 0),
-            "total_qty_consumed":   round(comp_qty[comp_id], 1),
-            "flag_single_customer": flag_single_customer,
-            "flag_single_product":  flag_single_product,
-            "flag_single_supplier": flag_single_supplier,
-            "risk_score":           risk_score,
+            "component_id":          cid,
+            "name":                  meta["name"] or cid,
+            "item_type":             meta["item_type"],
+            "risk_score":            risk_score,
+            "flag_single_customer":  flag_single_customer,
+            "flag_few_boms":         flag_few_boms,
+            "n_customers":           n_cust,
+            "customers":             sorted(comp_customers[cid]),
+            "n_fg_products":         n_prod,
+            "fg_products":           sorted(comp_fg_prods[cid]),
+            "inventory_on_hand":     round(on_hand, 1),
+            "safety_stock":          round(safety_stock, 1),
+            "excess_inventory":      round(excess, 1),
+            "avg_monthly_consumption": round(avg_monthly, 1),
+            "months_coverage":       months_coverage,
+            "unit_cost":             round(unit_cost, 4) if unit_cost else 0,
+            "slow_moving_value":     slow_moving_value,
+            "supplier":              inv.get("supplier", ""),
+            "in_inventory_file":     cid in inv_data,
         })
 
-    results.sort(key=lambda x: (-x["risk_score"], -x["revenue_at_risk"]))
+    results.sort(key=lambda x: (-x["risk_score"], -x["slow_moving_value"]))
 
-    # ── KPI summary ───────────────────────────────────────────────────────────
-    months_in_file = sorted({row[2] for row in sales_rows})
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    flagged     = [r for r in results if r["risk_score"] >= 1]
+    both_flags  = [r for r in results if r["risk_score"] == 2]
     kpis = {
-        "total_components_analysed": len(results),
-        "high_risk_components":      sum(1 for r in results if r["risk_score"] == 3),
-        "medium_risk_components":    sum(1 for r in results if r["risk_score"] == 2),
-        "low_risk_components":       sum(1 for r in results if r["risk_score"] == 1),
-        "safe_components":           sum(1 for r in results if r["risk_score"] == 0),
-        "revenue_at_risk_eur":       round(sum(r["revenue_at_risk"] for r in results if r["risk_score"] >= 2), 0),
-        "unique_customers":          len({row[0] for row in sales_rows}),
-        "unique_fg_products":        len({row[1] for row in sales_rows}),
-        "period_from":               months_in_file[0]  if months_in_file else "",
-        "period_to":                 months_in_file[-1] if months_in_file else "",
-        "rows_parsed":               len(sales_rows),
-        "parse_errors":              parse_errors,
+        "total_components_analysed":  len(results),
+        "single_customer_components": sum(1 for r in results if r["flag_single_customer"]),
+        "few_bom_components":         sum(1 for r in results if r["flag_few_boms"]),
+        "both_flags_components":      len(both_flags),
+        "total_excess_inventory_value": round(sum(r["slow_moving_value"] for r in flagged), 0),
+        "bom_threshold_used":         bom_threshold,
+        "unique_customers":           len({r[0] for r in sales_rows}),
+        "unique_fg_products":         len({r[1] for r in sales_rows}),
+        "period_from":                months_in_file[0]  if months_in_file else "",
+        "period_to":                  months_in_file[-1] if months_in_file else "",
+        "rows_parsed":                len(sales_rows),
+        "inv_items_matched":          sum(1 for r in results if r["in_inventory_file"]),
     }
 
     return jsonify({"ok": True, "kpis": kpis, "components": results})
