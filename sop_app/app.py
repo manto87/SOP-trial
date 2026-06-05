@@ -5,9 +5,10 @@ import json
 import math
 import os
 import uuid
+import io
 from datetime import datetime, date
 from collections import defaultdict
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, send_file
 import planning_engine
 
 app = Flask(__name__)
@@ -2877,6 +2878,592 @@ def api_analytics_builtin(query_key):
         })
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
+
+
+# ── BOM IMPORT / EXPORT ───────────────────────────────────────────────────────
+
+def _bom_compute_levels(rows):
+    """
+    Given a list of (parent_id, child_id, qty) compute bom_level for each row.
+    bom_level = BFS depth of the parent node from any root.
+    Roots = nodes that appear as parent but never as child (i.e. FG products).
+    """
+    from collections import deque
+    children_of = defaultdict(set)
+    all_parents = set()
+    all_children = set()
+    for p, c, _ in rows:
+        children_of[p].add(c)
+        all_parents.add(p)
+        all_children.add(c)
+
+    roots = all_parents - all_children
+    depth = {r: 0 for r in roots}
+    queue = deque(roots)
+    while queue:
+        node = queue.popleft()
+        for child in children_of.get(node, set()):
+            if child not in depth:
+                depth[child] = depth[node] + 1
+                queue.append(child)
+
+    return {(p, c): depth.get(p, 0) for p, c, _ in rows}
+
+
+def _bom_has_cycle(rows):
+    """Return True if the parent→child graph has a cycle."""
+    from collections import defaultdict
+    children = defaultdict(set)
+    for p, c, _ in rows:
+        children[p].add(c)
+    all_nodes = {p for p, c, _ in rows} | {c for p, c, _ in rows}
+
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {}
+
+    def dfs(node):
+        color[node] = GRAY
+        for child in children.get(node, set()):
+            if color.get(child) == GRAY:
+                return True
+            if color.get(child) != BLACK:
+                if dfs(child):
+                    return True
+        color[node] = BLACK
+        return False
+
+    for node in all_nodes:
+        if node not in color:
+            if dfs(node):
+                return True
+    return False
+
+
+@app.route("/api/bom/export")
+def api_bom_export():
+    """Download current bill_of_materials as Excel."""
+    try:
+        import openpyxl
+    except ImportError:
+        return jsonify({"error": "openpyxl not installed"}), 500
+
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT b.parent_id, b.child_id, b.quantity, b.bom_level,
+               COALESCE(p.name, m.name) as child_name,
+               CASE WHEN p.product_id IS NOT NULL THEN 'fg'
+                    ELSE COALESCE(m.material_type, 'component') END as child_type
+        FROM bill_of_materials b
+        LEFT JOIN products p ON p.product_id = b.child_id
+        LEFT JOIN materials m ON m.material_id = b.child_id
+        ORDER BY b.bom_level, b.parent_id, b.child_id
+    """).fetchall()
+    conn.close()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "BOM"
+    ws.append(["parent_id", "child_id", "quantity", "bom_level", "child_name", "child_type"])
+    for r in rows:
+        ws.append([r["parent_id"], r["child_id"], r["quantity"], r["bom_level"],
+                   r["child_name"], r["child_type"]])
+
+    # Column widths
+    for col, width in zip("ABCDEF", [12, 12, 10, 10, 36, 14]):
+        ws.column_dimensions[col].width = width
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name="bom_export.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.route("/api/bom/import", methods=["POST"])
+def api_bom_import():
+    """
+    Import BOM from Excel upload.
+
+    Query params:
+      preview=1   — parse + validate only, no DB write (default 0)
+      mode        — replace_all | replace_products | merge (default replace_products)
+                    replace_all:      delete entire table, insert all rows
+                    replace_products: delete rows whose parent_id appears in the file, insert all
+                    merge:            delete rows with matching (parent_id, child_id), insert all
+
+    Excel columns (auto-detected by header name):
+      parent_id   — required
+      child_id    — required
+      quantity    — required
+      bom_level   — optional; computed by BFS if absent
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return jsonify({"ok": False, "message": "openpyxl not installed"}), 500
+
+    preview = request.args.get("preview", "0") == "1"
+    mode    = request.args.get("mode", "replace_products")
+    if mode not in ("replace_all", "replace_products", "merge"):
+        return jsonify({"ok": False, "message": f"Unknown mode: {mode}"}), 400
+
+    if "file" not in request.files:
+        return jsonify({"ok": False, "message": "No file uploaded"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"ok": False, "message": "Empty filename"}), 400
+
+    # ── parse Excel ───────────────────────────────────────────────────────────
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(f.read()), read_only=True, data_only=True)
+        ws = wb.active
+        it = iter(ws.values)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"Cannot read Excel: {e}"}), 400
+
+    raw_header = list(next(it, []))
+    if not raw_header:
+        return jsonify({"ok": False, "message": "File empty or missing header row"}), 400
+    header = [str(c).strip().lower() if c is not None else "" for c in raw_header]
+
+    def find_col(candidates):
+        for cand in candidates:
+            for i, h in enumerate(header):
+                if cand in h:
+                    return i
+        return None
+
+    col_parent = find_col(["parent_id", "parent", "assembly", "fg", "father"])
+    col_child  = find_col(["child_id",  "child",  "component", "material", "item"])
+    col_qty    = find_col(["qty", "quant", "quantity", "amount"])
+    col_level  = find_col(["bom_level", "level", "livello", "depth"])
+
+    missing = [n for n, c in [("parent_id", col_parent), ("child_id", col_child),
+                               ("quantity",  col_qty)] if c is None]
+    if missing:
+        return jsonify({
+            "ok": False,
+            "message": f"Columns not found: {', '.join(missing)}. "
+                       f"Headers detected: {', '.join(header) or '(none)'}."
+        }), 400
+
+    # ── load valid IDs from DB ────────────────────────────────────────────────
+    conn = get_db()
+    valid_ids = (
+        {r["product_id"]  for r in conn.execute("SELECT product_id  FROM products").fetchall()} |
+        {r["material_id"] for r in conn.execute("SELECT material_id FROM materials").fetchall()}
+    )
+    conn.close()
+
+    # ── parse rows ────────────────────────────────────────────────────────────
+    parsed      = []   # (parent_id, child_id, qty, bom_level_raw)
+    row_warnings = {}  # row_idx -> list of warning strings
+    row_errors   = {}  # row_idx -> list of error strings
+    seen_pairs  = {}   # (parent, child) -> row_idx of first occurrence
+
+    for idx, row in enumerate(it, start=2):  # start=2 because row 1 is header
+        def cell(c):
+            return row[c] if c is not None and c < len(row) else None
+
+        parent_raw = cell(col_parent)
+        child_raw  = cell(col_child)
+        qty_raw    = cell(col_qty)
+        level_raw  = cell(col_level) if col_level is not None else None
+
+        warns  = []
+        errors = []
+
+        parent = str(parent_raw).strip() if parent_raw is not None else ""
+        child  = str(child_raw).strip()  if child_raw  is not None else ""
+
+        if not parent:
+            errors.append("parent_id mancante")
+        if not child:
+            errors.append("child_id mancante")
+
+        try:
+            qty = float(qty_raw) if qty_raw is not None else None
+            if qty is None:
+                errors.append("quantity mancante")
+            elif qty <= 0:
+                errors.append(f"quantity deve essere > 0 (trovato {qty})")
+            else:
+                qty = int(qty) if qty == int(qty) else qty
+        except (TypeError, ValueError):
+            errors.append(f"quantity non numerica: {qty_raw!r}")
+            qty = None
+
+        bom_level_raw = None
+        if col_level is not None and level_raw is not None:
+            try:
+                bom_level_raw = int(float(level_raw))
+            except (TypeError, ValueError):
+                warns.append(f"bom_level non numerico ({level_raw!r}), verrà calcolato")
+
+        if parent and parent not in valid_ids:
+            warns.append(f"parent_id '{parent}' non trovato in products/materials")
+        if child and child not in valid_ids:
+            warns.append(f"child_id '{child}' non trovato in products/materials")
+
+        pair = (parent, child)
+        if pair in seen_pairs and parent and child:
+            warns.append(f"duplicato di riga {seen_pairs[pair]}, verrà sovrascritto")
+        elif parent and child:
+            seen_pairs[pair] = idx
+
+        if warns:
+            row_warnings[idx] = warns
+        if errors:
+            row_errors[idx] = errors
+
+        if not errors and parent and child and qty is not None:
+            parsed.append((parent, child, qty, bom_level_raw))
+
+    # ── validate graph ────────────────────────────────────────────────────────
+    graph_error = None
+    if parsed and _bom_has_cycle([(p, c, q) for p, c, q, _ in parsed]):
+        graph_error = "Ciclo rilevato nel grafo BOM — import bloccato"
+
+    # ── compute missing bom_levels via BFS ────────────────────────────────────
+    level_map = _bom_compute_levels([(p, c, q) for p, c, q, _ in parsed])
+    final_rows = []
+    for p, c, q, lvl_raw in parsed:
+        lvl = lvl_raw if lvl_raw is not None else level_map.get((p, c), 0)
+        final_rows.append({"parent_id": p, "child_id": c, "quantity": q, "bom_level": lvl})
+
+    # Deduplicate: keep last occurrence of each (parent, child)
+    seen = {}
+    for row in final_rows:
+        seen[(row["parent_id"], row["child_id"])] = row
+    final_rows = list(seen.values())
+
+    # ── build preview (first 50 rows) ─────────────────────────────────────────
+    preview_rows = final_rows[:50]
+
+    result = {
+        "ok":            graph_error is None,
+        "message":       graph_error or "",
+        "rows_parsed":   len(parsed),
+        "rows_valid":    len(final_rows),
+        "rows_warned":   len(row_warnings),
+        "rows_errored":  len(row_errors),
+        "warnings":      [{"row": k, "msgs": v} for k, v in sorted(row_warnings.items())],
+        "errors":        [{"row": k, "msgs": v} for k, v in sorted(row_errors.items())],
+        "preview":       preview_rows,
+        "preview_total": len(final_rows),
+        "levels_computed": sum(1 for _, _, _, l in parsed if l is None),
+    }
+
+    if preview or graph_error:
+        return jsonify(result)
+
+    # ── write to DB ───────────────────────────────────────────────────────────
+    conn = get_db()
+    try:
+        if mode == "replace_all":
+            conn.execute("DELETE FROM bill_of_materials")
+
+        elif mode == "replace_products":
+            parent_ids = list({r["parent_id"] for r in final_rows})
+            placeholders = ",".join(["?"] * len(parent_ids))
+            conn.execute(f"DELETE FROM bill_of_materials WHERE parent_id IN ({placeholders})",
+                         parent_ids)
+
+        elif mode == "merge":
+            for r in final_rows:
+                conn.execute("DELETE FROM bill_of_materials WHERE parent_id=? AND child_id=?",
+                             (r["parent_id"], r["child_id"]))
+
+        conn.executemany(
+            "INSERT INTO bill_of_materials (parent_id, child_id, quantity, bom_level) VALUES (?,?,?,?)",
+            [(r["parent_id"], r["child_id"], r["quantity"], r["bom_level"]) for r in final_rows]
+        )
+        conn.commit()
+        result["imported"] = len(final_rows)
+        result["mode_used"] = mode
+    except Exception as e:
+        conn.rollback()
+        result["ok"] = False
+        result["message"] = f"DB write error: {e}"
+    finally:
+        conn.close()
+
+    return jsonify(result)
+
+
+# ── E2E RISK ANALYSIS ─────────────────────────────────────────────────────────
+
+@app.route("/api/risk/component_exposure", methods=["POST"])
+def api_risk_component_exposure():
+    """
+    Two-file upload:
+      file            — sales data: customer | product_id | month | quantity
+      inventory_file  — inventory:  item_id  | inventory  | safety_stock
+                                  [ unit_cost ] [ supplier ]
+
+    Form param:
+      bom_threshold   — int (default 2): flag components in <= N finished goods
+
+    Risk flags (score 0-2):
+      flag_single_customer : component in products of only 1 customer
+      flag_few_boms        : component in <= bom_threshold FG products
+
+    Impact metric:
+      excess_inventory  = max(0, inventory_on_hand - safety_stock)
+      slow_moving_value = excess_inventory * unit_cost
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return jsonify({"ok": False, "message": "openpyxl not installed"}), 500
+
+    # ── inputs ────────────────────────────────────────────────────────────────
+    if "file" not in request.files:
+        return jsonify({"ok": False, "message": "File vendite mancante (campo 'file')"}), 400
+    if "inventory_file" not in request.files:
+        return jsonify({"ok": False, "message": "File inventario mancante (campo 'inventory_file')"}), 400
+
+    try:
+        bom_threshold = int(request.form.get("bom_threshold", 2))
+    except (TypeError, ValueError):
+        bom_threshold = 2
+
+    # ── helper: parse Excel, return (header, row_iterator) ────────────────────
+    def _open_xl(field_name):
+        f = request.files[field_name]
+        if not f.filename:
+            raise ValueError(f"File '{field_name}' vuoto")
+        wb = openpyxl.load_workbook(io.BytesIO(f.read()), read_only=True, data_only=True)
+        ws = wb.active
+        it = iter(ws.values)
+        raw_hdr = list(next(it, []))
+        if not raw_hdr:
+            raise ValueError(f"File '{field_name}' senza header")
+        hdr = [str(c).strip().lower() if c is not None else "" for c in raw_hdr]
+        return hdr, it
+
+    def _find(hdr, candidates):
+        for cand in candidates:
+            for i, h in enumerate(hdr):
+                if cand in h:
+                    return i
+        return None
+
+    # ── parse sales file ──────────────────────────────────────────────────────
+    try:
+        sh, sit = _open_xl("file")
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"File vendite: {e}"}), 400
+
+    sc_cust = _find(sh, ["customer", "cust", "client", "cliente", "buyer"])
+    sc_prod = _find(sh, ["product_id", "product", "item_id", "sku", "prodott", "fg", "article"])
+    sc_mon  = _find(sh, ["month", "mese", "period", "date", "data", "year_month"])
+    sc_qty  = _find(sh, ["qty", "quant", "volume", "unit", "pieces", "pcs"])
+
+    miss = [n for n, c in [("customer", sc_cust), ("product_id", sc_prod),
+                            ("month", sc_mon), ("quantity", sc_qty)] if c is None]
+    if miss:
+        return jsonify({"ok": False,
+                        "message": f"File vendite — colonne non trovate: {', '.join(miss)}. "
+                                   f"Header rilevati: {', '.join(sh)}"}), 400
+
+    sales_rows, sales_errs = [], 0
+    for row in sit:
+        try:
+            def _c(i): return row[i] if i is not None and i < len(row) else None
+            cust = str(_c(sc_cust)).strip() if _c(sc_cust) is not None else ""
+            prod = str(_c(sc_prod)).strip()  if _c(sc_prod) is not None else ""
+            mon_r = _c(sc_mon)
+            qty_r = _c(sc_qty)
+            if not cust or not prod or mon_r is None:
+                continue
+            mon = mon_r.strftime("%Y-%m") if hasattr(mon_r, "strftime") else str(mon_r).strip()[:7]
+            qty = float(qty_r) if qty_r is not None else 0.0
+            if cust and prod and mon:
+                sales_rows.append((cust, prod, mon, qty))
+        except (TypeError, ValueError, IndexError):
+            sales_errs += 1
+
+    if not sales_rows:
+        return jsonify({"ok": False, "message": "File vendite: nessuna riga valida"}), 400
+
+    # ── parse inventory file ──────────────────────────────────────────────────
+    try:
+        ih, iit = _open_xl("inventory_file")
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"File inventario: {e}"}), 400
+
+    ic_item = _find(ih, ["item_id", "item", "material", "component", "codice", "code"])
+    ic_inv  = _find(ih, ["inventory", "inv", "on_hand", "stock", "giacenza", "magazzino", "qty"])
+    ic_ss   = _find(ih, ["safety_stock", "safety", "ss", "scorta", "min_stock"])
+    ic_cost = _find(ih, ["unit_cost", "cost", "costo", "price", "prezzo"])
+    ic_supp = _find(ih, ["supplier", "fornitore", "vendor"])
+
+    miss_inv = [n for n, c in [("item_id", ic_item), ("inventory", ic_inv),
+                                ("safety_stock", ic_ss)] if c is None]
+    if miss_inv:
+        return jsonify({"ok": False,
+                        "message": f"File inventario — colonne non trovate: {', '.join(miss_inv)}. "
+                                   f"Header rilevati: {', '.join(ih)}"}), 400
+
+    inv_data = {}   # item_id -> {on_hand, safety_stock, unit_cost, supplier}
+    for row in iit:
+        try:
+            def _ci(i): return row[i] if i is not None and i < len(row) else None
+            item = str(_ci(ic_item)).strip() if _ci(ic_item) is not None else ""
+            if not item:
+                continue
+            on_hand  = float(_ci(ic_inv)) if _ci(ic_inv) is not None else 0.0
+            ss       = float(_ci(ic_ss))  if _ci(ic_ss)  is not None else 0.0
+            cost     = float(_ci(ic_cost)) if ic_cost is not None and _ci(ic_cost) is not None else None
+            supplier = str(_ci(ic_supp)).strip() if ic_supp is not None and _ci(ic_supp) is not None else ""
+            inv_data[item] = {"on_hand": on_hand, "safety_stock": ss,
+                              "unit_cost": cost, "supplier": supplier}
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    if not inv_data:
+        return jsonify({"ok": False, "message": "File inventario: nessuna riga valida"}), 400
+
+    # ── load BOM + unit_cost fallback from DB ─────────────────────────────────
+    conn = get_db()
+    bom_rows = conn.execute("""
+        SELECT b.parent_id, b.child_id, b.quantity,
+               COALESCE(p.name, m.name) as name,
+               CASE WHEN p.product_id IS NOT NULL THEN 'fg'
+                    ELSE COALESCE(m.material_type, 'component') END as item_type,
+               COALESCE(m.unit_cost, p.unit_price, 0) as db_unit_cost
+        FROM bill_of_materials b
+        LEFT JOIN products p ON p.product_id = b.child_id
+        LEFT JOIN materials m ON m.material_id = b.child_id
+    """).fetchall()
+    conn.close()
+
+    db_unit_cost = {r["child_id"]: r["db_unit_cost"] for r in bom_rows}
+
+    bom_dict = defaultdict(list)
+    for r in bom_rows:
+        bom_dict[r["parent_id"]].append({
+            "child_id":    r["child_id"],
+            "qty":         r["quantity"],
+            "name":        r["name"],
+            "item_type":   r["item_type"],
+        })
+
+    # ── recursive BOM explosion ───────────────────────────────────────────────
+    def explode_bom(item_id, mult=1.0, visited=None):
+        if visited is None: visited = set()
+        if item_id in visited: return {}
+        visited = visited | {item_id}
+        result = {}
+        for ch in bom_dict.get(item_id, []):
+            cid = ch["child_id"]
+            eq  = ch["qty"] * mult
+            if cid in result:
+                result[cid]["effective_qty"] += eq
+            else:
+                result[cid] = {**ch, "effective_qty": eq}
+            for dcid, dd in explode_bom(cid, eq, visited).items():
+                if dcid in result:
+                    result[dcid]["effective_qty"] += dd["effective_qty"]
+                else:
+                    result[dcid] = dd
+        return result
+
+    bom_cache = {fg: explode_bom(fg) for fg in {r[1] for r in sales_rows}}
+
+    # ── aggregate per component ───────────────────────────────────────────────
+    comp_customers = defaultdict(set)
+    comp_fg_prods  = defaultdict(set)
+    comp_qty_total = defaultdict(float)
+    comp_meta      = {}
+
+    for cust, prod, mon, qty in sales_rows:
+        for cid, cdata in bom_cache.get(prod, {}).items():
+            comp_customers[cid].add(cust)
+            comp_fg_prods[cid].add(prod)
+            comp_qty_total[cid] += qty * cdata["effective_qty"]
+            if cid not in comp_meta:
+                comp_meta[cid] = {"name": cdata["name"], "item_type": cdata["item_type"]}
+
+    if not comp_customers:
+        prods = sorted({r[1] for r in sales_rows})
+        return jsonify({"ok": False,
+                        "message": f"Nessuna corrispondenza BOM per i prodotti: {', '.join(prods)}. "
+                                   f"Verificare che i product_id corrispondano ai codici DB (FG001–FG010)."}), 400
+
+    # ── build results ─────────────────────────────────────────────────────────
+    months_in_file = sorted({r[2] for r in sales_rows})
+    n_months       = max(len(months_in_file), 1)
+
+    results = []
+    for cid in comp_customers:
+        meta   = comp_meta[cid]
+        n_cust = len(comp_customers[cid])
+        n_prod = len(comp_fg_prods[cid])
+        qty_tot = comp_qty_total[cid]
+
+        flag_single_customer = (n_cust <= 1)
+        flag_few_boms        = (n_prod <= bom_threshold)
+        risk_score           = int(flag_single_customer) + int(flag_few_boms)
+
+        inv   = inv_data.get(cid, {})
+        on_hand      = inv.get("on_hand", 0.0)
+        safety_stock = inv.get("safety_stock", 0.0)
+        excess       = max(0.0, on_hand - safety_stock)
+
+        # unit_cost: file first, then DB
+        unit_cost = inv.get("unit_cost")
+        if unit_cost is None:
+            unit_cost = db_unit_cost.get(cid, 0) or 0
+
+        slow_moving_value = round(excess * unit_cost, 0)
+        avg_monthly = qty_tot / n_months
+        months_coverage = round(on_hand / avg_monthly, 1) if avg_monthly > 0 else None
+
+        results.append({
+            "component_id":          cid,
+            "name":                  meta["name"] or cid,
+            "item_type":             meta["item_type"],
+            "risk_score":            risk_score,
+            "flag_single_customer":  flag_single_customer,
+            "flag_few_boms":         flag_few_boms,
+            "n_customers":           n_cust,
+            "customers":             sorted(comp_customers[cid]),
+            "n_fg_products":         n_prod,
+            "fg_products":           sorted(comp_fg_prods[cid]),
+            "inventory_on_hand":     round(on_hand, 1),
+            "safety_stock":          round(safety_stock, 1),
+            "excess_inventory":      round(excess, 1),
+            "avg_monthly_consumption": round(avg_monthly, 1),
+            "months_coverage":       months_coverage,
+            "unit_cost":             round(unit_cost, 4) if unit_cost else 0,
+            "slow_moving_value":     slow_moving_value,
+            "supplier":              inv.get("supplier", ""),
+            "in_inventory_file":     cid in inv_data,
+        })
+
+    results.sort(key=lambda x: (-x["risk_score"], -x["slow_moving_value"]))
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    flagged     = [r for r in results if r["risk_score"] >= 1]
+    both_flags  = [r for r in results if r["risk_score"] == 2]
+    kpis = {
+        "total_components_analysed":  len(results),
+        "single_customer_components": sum(1 for r in results if r["flag_single_customer"]),
+        "few_bom_components":         sum(1 for r in results if r["flag_few_boms"]),
+        "both_flags_components":      len(both_flags),
+        "total_excess_inventory_value": round(sum(r["slow_moving_value"] for r in flagged), 0),
+        "bom_threshold_used":         bom_threshold,
+        "unique_customers":           len({r[0] for r in sales_rows}),
+        "unique_fg_products":         len({r[1] for r in sales_rows}),
+        "period_from":                months_in_file[0]  if months_in_file else "",
+        "period_to":                  months_in_file[-1] if months_in_file else "",
+        "rows_parsed":                len(sales_rows),
+        "inv_items_matched":          sum(1 for r in results if r["in_inventory_file"]),
+    }
+
+    return jsonify({"ok": True, "kpis": kpis, "components": results})
 
 
 if __name__ == "__main__":

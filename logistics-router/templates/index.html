@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Logistics Route Calculator</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2e3250;
+    --accent: #4f8ef7;
+    --sea: #4f8ef7;
+    --air: #f5a623;
+    --truck: #50c878;
+    --text: #e8eaf6;
+    --muted: #8892b0;
+    --danger: #e05c5c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; height: 100vh; display: flex; flex-direction: column; }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .5px; }
+  header span { color: var(--muted); font-size: 13px; }
+
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Left panel ── */
+  .panel {
+    width: 340px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .panel-section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .panel-section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 10px; }
+
+  .field { margin-bottom: 10px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .field input {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 7px 10px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  .field input:focus { border-color: var(--accent); }
+  .field input::placeholder { color: var(--muted); }
+
+  .coord-row { display: flex; gap: 8px; }
+  .coord-row .field { flex: 1; margin-bottom: 0; }
+
+  .autocomplete-wrapper { position: relative; }
+  .autocomplete-list {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    max-height: 180px;
+    overflow-y: auto;
+    z-index: 9999;
+    display: none;
+  }
+  .autocomplete-list.open { display: block; }
+  .autocomplete-item {
+    padding: 7px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .autocomplete-item:hover, .autocomplete-item.active { background: var(--border); }
+  .autocomplete-item small { color: var(--muted); margin-left: 6px; }
+
+  .or-divider { text-align: center; font-size: 11px; color: var(--muted); margin: 6px 0; }
+
+  .mode-toggles { display: flex; gap: 8px; flex-wrap: wrap; }
+  .mode-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 5px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    user-select: none;
+    transition: border-color .15s;
+  }
+  .mode-toggle input { display: none; }
+  .mode-toggle.sea  { --c: var(--sea); }
+  .mode-toggle.air  { --c: var(--air); }
+  .mode-toggle.truck { --c: var(--truck); }
+  .mode-toggle.active { border-color: var(--c); background: color-mix(in srgb, var(--c) 12%, var(--surface2)); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+
+  .btn-calc {
+    width: 100%;
+    padding: 10px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity .15s;
+    margin-top: 4px;
+  }
+  .btn-calc:hover { opacity: .88; }
+  .btn-calc:disabled { opacity: .4; cursor: default; }
+
+  /* map click hint */
+  .map-hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* Results */
+  .results { padding: 14px 16px; flex: 1; }
+  .results h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 10px; }
+
+  .result-cards { display: flex; flex-direction: column; gap: 10px; }
+  .result-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .result-card.sea   { border-left: 3px solid var(--sea); }
+  .result-card.air   { border-left: 3px solid var(--air); }
+  .result-card.truck { border-left: 3px solid var(--truck); }
+  .result-card.hidden { display: none; }
+
+  .rc-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .rc-title { font-weight: 600; font-size: 13px; }
+  .rc-km { font-size: 12px; color: var(--muted); }
+  .rc-body { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+  .rc-stat {
+    padding: 8px 12px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .rc-stat:nth-child(even) { border-right: none; }
+  .rc-stat:nth-last-child(-n+2) { border-bottom: none; }
+  .rc-stat-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .rc-stat-value { font-size: 14px; font-weight: 600; margin-top: 2px; }
+
+  .no-results { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .error-msg { color: var(--danger); font-size: 12px; margin-top: 8px; }
+
+  .loading { color: var(--muted); font-size: 12px; margin-top: 8px; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+
+  /* ── Map ── */
+  .map-wrapper { flex: 1; position: relative; display: flex; flex-direction: column; }
+  #map { flex: 1; min-height: 0; z-index: 1; }
+
+  /* map marker labels */
+  .marker-label {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 11px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  /* pickup mode banner */
+  .pick-banner {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--accent);
+    color: #fff;
+    border-radius: 20px;
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    z-index: 1000;
+    pointer-events: none;
+    display: none;
+  }
+  .pick-banner.show { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>🚢</div>
+  <h1>Logistics Route Calculator</h1>
+  <span>— maritime · air · truck</span>
+</header>
+
+<div class="main">
+  <!-- Left Panel -->
+  <div class="panel">
+
+    <!-- Origin -->
+    <div class="panel-section">
+      <h2>Origin</h2>
+      <div class="field">
+        <label>Port / City</label>
+        <div class="autocomplete-wrapper">
+          <input id="origin-name" type="text" placeholder="Search port or city…" autocomplete="off" oninput="acSearch('origin', this.value)" onkeydown="acKey(event,'origin')"/>
+          <div class="autocomplete-list" id="origin-ac"></div>
+        </div>
+      </div>
+      <div class="or-divider">— or enter coordinates —</div>
+      <div class="coord-row">
+        <div class="field"><label>Lat</label><input id="olat" type="number" step="any" placeholder="e.g. 45.44"/></div>
+        <div class="field"><label>Lng</label><input id="olng" type="number" step="any" placeholder="e.g. 12.32"/></div>
+      </div>
+      <p class="map-hint">Or click the map to pick origin (first click).</p>
+    </div>
+
+    <!-- Destination -->
+    <div class="panel-section">
+      <h2>Destination</h2>
+      <div class="field">
+        <label>Port / City</label>
+        <div class="autocomplete-wrapper">
+          <input id="dest-name" type="text" placeholder="Search port or city…" autocomplete="off" oninput="acSearch('dest', this.value)" onkeydown="acKey(event,'dest')"/>
+          <div class="autocomplete-list" id="dest-ac"></div>
+        </div>
+      </div>
+      <div class="or-divider">— or enter coordinates —</div>
+      <div class="coord-row">
+        <div class="field"><label>Lat</label><input id="dlat" type="number" step="any" placeholder="e.g. 1.35"/></div>
+        <div class="field"><label>Lng</label><input id="dlng" type="number" step="any" placeholder="e.g. 103.82"/></div>
+      </div>
+      <p class="map-hint">Second map click sets destination.</p>
+    </div>
+
+    <!-- Settings -->
+    <div class="panel-section">
+      <h2>Cargo &amp; Modes</h2>
+      <div class="field">
+        <label>Cargo weight (tonnes)</label>
+        <input id="cargo" type="number" step="any" min="0.001" value="1" placeholder="1"/>
+      </div>
+      <div style="margin-bottom:10px;">
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px;">Transport modes</label>
+        <div class="mode-toggles">
+          <label class="mode-toggle sea active" id="toggle-sea">
+            <input type="checkbox" checked onchange="toggleMode('sea',this)"/>
+            <span class="dot"></span> Sea
+          </label>
+          <label class="mode-toggle air active" id="toggle-air">
+            <input type="checkbox" checked onchange="toggleMode('air',this)"/>
+            <span class="dot"></span> Air
+          </label>
+          <label class="mode-toggle truck active" id="toggle-truck">
+            <input type="checkbox" checked onchange="toggleMode('truck',this)"/>
+            <span class="dot"></span> Truck
+          </label>
+        </div>
+      </div>
+      <button class="btn-calc" onclick="calculate()">Calculate Routes</button>
+    </div>
+
+    <!-- Results -->
+    <div class="results">
+      <h2>Results</h2>
+      <div id="results-area">
+        <p class="no-results">Enter origin &amp; destination, then click Calculate.</p>
+      </div>
+    </div>
+
+  </div><!-- /panel -->
+
+  <!-- Map container -->
+  <div class="map-wrapper">
+    <div class="pick-banner" id="pick-banner">Click map to set origin</div>
+    <div id="map"></div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────────────
+const st = {
+  ports: {},
+  modes: { sea: true, air: true, truck: true },
+  pickStep: 0,  // 0=origin, 1=dest, 2=done
+  markers: { o: null, d: null },
+  layers: { sea: null, air: null, truck: null },
+  lastResult: null,
+};
+
+// ── Map setup ──────────────────────────────────────────────────────────────────────────
+const map = L.map('map', { zoomControl: true }).setView([20, 10], 2);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap &copy; CARTO',
+  subdomains: 'abcd', maxZoom: 19,
+}).addTo(map);
+
+function makeIcon(color, label) {
+  return L.divIcon({
+    className: '',
+    html: `<div style="width:12px;height:12px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,.6)"></div>`,
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
+  });
+}
+
+map.on('click', function(e) {
+  const { lat, lng } = e.latlng;
+  if (st.pickStep === 0) {
+    setOrigin(lat, lng, null);
+    st.pickStep = 1;
+    document.getElementById('pick-banner').textContent = 'Click map to set destination';
+    document.getElementById('pick-banner').classList.add('show');
+  } else if (st.pickStep === 1) {
+    setDest(lat, lng, null);
+    st.pickStep = 2;
+    document.getElementById('pick-banner').classList.remove('show');
+  } else {
+    // reset pick cycle
+    setOrigin(lat, lng, null);
+    st.pickStep = 1;
+    document.getElementById('pick-banner').textContent = 'Click map to set destination';
+    document.getElementById('pick-banner').classList.add('show');
+  }
+});
+
+// Show banner on load for guidance
+document.getElementById('pick-banner').classList.add('show');
+
+// ── Marker helpers ─────────────────────────────────────────────────────────────────────
+function placeMarker(key, lat, lng, label) {
+  if (st.markers[key]) map.removeLayer(st.markers[key]);
+  const color = key === 'o' ? '#4f8ef7' : '#f5a623';
+  const m = L.marker([lat, lng], { icon: makeIcon(color, label) })
+    .bindTooltip(label || (key === 'o' ? 'Origin' : 'Destination'), {
+      permanent: true, direction: 'top', offset: [0, -8],
+      className: 'marker-label',
+    })
+    .addTo(map);
+  st.markers[key] = m;
+}
+
+function setOrigin(lat, lng, name) {
+  document.getElementById('olat').value = lat.toFixed(5);
+  document.getElementById('olng').value = lng.toFixed(5);
+  if (name) document.getElementById('origin-name').value = name;
+  placeMarker('o', lat, lng, name || `${lat.toFixed(2)}, ${lng.toFixed(2)}`);
+}
+
+function setDest(lat, lng, name) {
+  document.getElementById('dlat').value = lat.toFixed(5);
+  document.getElementById('dlng').value = lng.toFixed(5);
+  if (name) document.getElementById('dest-name').value = name;
+  placeMarker('d', lat, lng, name || `${lat.toFixed(2)}, ${lng.toFixed(2)}`);
+}
+
+// ── Autocomplete ───────────────────────────────────────────────────────────────────────
+let acResults = { origin: [], dest: [] };
+let acIdx = { origin: -1, dest: -1 };
+
+async function loadPorts() {
+  const res = await fetch('/api/ports');
+  st.ports = await res.json();
+}
+
+function acSearch(which, q) {
+  const list = document.getElementById(which === 'origin' ? 'origin-ac' : 'dest-ac');
+  if (!q || q.length < 2) { list.classList.remove('open'); return; }
+  const ql = q.toLowerCase();
+  const matches = Object.entries(st.ports)
+    .filter(([name, _]) => name.toLowerCase().includes(ql))
+    .slice(0, 8);
+  acResults[which] = matches;
+  acIdx[which] = -1;
+  list.innerHTML = matches.map(([name, coords], i) =>
+    `<div class="autocomplete-item" data-i="${i}" onmousedown="acSelect('${which}',${i})">${name} <small>${coords[0].toFixed(1)}, ${coords[1].toFixed(1)}</small></div>`
+  ).join('');
+  list.classList.toggle('open', matches.length > 0);
+}
+
+function acKey(e, which) {
+  const list = document.getElementById(which === 'origin' ? 'origin-ac' : 'dest-ac');
+  const items = list.querySelectorAll('.autocomplete-item');
+  if (e.key === 'ArrowDown') { acIdx[which] = Math.min(acIdx[which]+1, items.length-1); }
+  else if (e.key === 'ArrowUp') { acIdx[which] = Math.max(acIdx[which]-1, 0); }
+  else if (e.key === 'Enter' && acIdx[which] >= 0) { acSelect(which, acIdx[which]); return; }
+  else if (e.key === 'Escape') { list.classList.remove('open'); return; }
+  items.forEach((el, i) => el.classList.toggle('active', i === acIdx[which]));
+}
+
+function acSelect(which, i) {
+  const [name, coords] = acResults[which][i];
+  const list = document.getElementById(which === 'origin' ? 'origin-ac' : 'dest-ac');
+  list.classList.remove('open');
+  if (which === 'origin') {
+    setOrigin(coords[0], coords[1], name);
+    st.pickStep = Math.max(st.pickStep, 1);
+  } else {
+    setDest(coords[0], coords[1], name);
+    st.pickStep = Math.max(st.pickStep, 2);
+  }
+  if (st.pickStep >= 2) document.getElementById('pick-banner').classList.remove('show');
+}
+
+// ── Mode toggles ────────────────────────────────────────────────────────────────────────
+function toggleMode(mode, cb) {
+  st.modes[mode] = cb.checked;
+  document.getElementById('toggle-' + mode).classList.toggle('active', cb.checked);
+  if (st.lastResult) renderResult(st.lastResult);
+}
+
+// ── Route layers ────────────────────────────────────────────────────────────────────────
+function clearLayers() {
+  ['sea','air','truck'].forEach(m => {
+    if (st.layers[m]) { map.removeLayer(st.layers[m]); st.layers[m] = null; }
+  });
+}
+
+function drawRoute(mode, waypoints, color, dashed) {
+  if (!waypoints || waypoints.length < 2) return;
+  // unwrap longitudes to avoid antimeridian jumps
+  const pts = waypoints.map(p => [p[0], p[1]]);
+  for (let i = 1; i < pts.length; i++) {
+    let diff = pts[i][1] - pts[i-1][1];
+    while (diff > 180) { pts[i][1] -= 360; diff = pts[i][1] - pts[i-1][1]; }
+    while (diff < -180) { pts[i][1] += 360; diff = pts[i][1] - pts[i-1][1]; }
+  }
+  const opts = { color, weight: 2.5, opacity: 0.9 };
+  if (dashed) opts.dashArray = '6 5';
+  st.layers[mode] = L.polyline(pts, opts).addTo(map);
+}
+
+function fitMap() {
+  const bounds = [];
+  if (st.markers.o) bounds.push(st.markers.o.getLatLng());
+  if (st.markers.d) bounds.push(st.markers.d.getLatLng());
+  ['sea','air','truck'].forEach(m => {
+    if (st.layers[m]) st.layers[m].getLatLngs().forEach(p => bounds.push(p));
+  });
+  if (bounds.length > 1) {
+    map.fitBounds(L.latLngBounds(bounds).pad(0.1));
+  }
+}
+
+// ── Calculate ──────────────────────────────────────────────────────────────────────────
+async function calculate() {
+  const olat = parseFloat(document.getElementById('olat').value);
+  const olng = parseFloat(document.getElementById('olng').value);
+  const dlat = parseFloat(document.getElementById('dlat').value);
+  const dlng = parseFloat(document.getElementById('dlng').value);
+  const cargo = parseFloat(document.getElementById('cargo').value) || 1;
+
+  if (isNaN(olat) || isNaN(olng) || isNaN(dlat) || isNaN(dlng)) {
+    showError('Please set both origin and destination.');
+    return;
+  }
+
+  document.getElementById('results-area').innerHTML = '<p class="loading">Calculating routes…</p>';
+  clearLayers();
+
+  try {
+    const res = await fetch('/api/calculate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ olat, olng, dlat, dlng, cargo_tonnes: cargo }),
+    });
+    const data = await res.json();
+    if (data.error) { showError(data.error); return; }
+    st.lastResult = data;
+    renderResult(data);
+  } catch (e) {
+    showError('Network error: ' + e.message);
+  }
+}
+
+function renderResult(data) {
+  clearLayers();
+
+  // Draw routes
+  if (st.modes.sea && data.sea && !data.sea.error) {
+    drawRoute('sea', data.sea.waypoints, '#4f8ef7', false);
+  }
+  if (st.modes.air && data.air && !data.air.error) {
+    drawRoute('air', data.air.waypoints, '#f5a623', true);
+  }
+  if (st.modes.truck && data.truck && !data.truck.error) {
+    drawRoute('truck', data.truck.waypoints, '#50c878', false);
+  }
+  fitMap();
+
+  // Render result cards
+  const cards = ['sea','air','truck'].map(mode => {
+    if (!st.modes[mode]) return `<div class="result-card ${mode} hidden"></div>`;
+    const r = data[mode];
+    if (!r || r.error) return `
+      <div class="result-card ${mode}">
+        <div class="rc-header">
+          <span class="rc-title">${modeLabel(mode)}</span>
+          <span class="rc-km" style="color:var(--danger)">Unavailable</span>
+        </div>
+      </div>`;
+    return `
+      <div class="result-card ${mode}">
+        <div class="rc-header">
+          <span class="rc-title">${modeLabel(mode)}</span>
+          <span class="rc-km">${fmtKm(r.distance_km)}</span>
+        </div>
+        <div class="rc-body">
+          <div class="rc-stat">
+            <div class="rc-stat-label">Transit</div>
+            <div class="rc-stat-value">${fmtDays(r.transit_days)}</div>
+          </div>
+          <div class="rc-stat">
+            <div class="rc-stat-label">CO₂ / tonne</div>
+            <div class="rc-stat-value">${fmtCO2(r.co2_kg_per_tonne)}</div>
+          </div>
+          <div class="rc-stat">
+            <div class="rc-stat-label">Total CO₂</div>
+            <div class="rc-stat-value">${fmtCO2(r.co2_total_kg)}</div>
+          </div>
+          <div class="rc-stat">
+            <div class="rc-stat-label">Est. Cost</div>
+            <div class="rc-stat-value">${fmtCost(r.cost_usd)}</div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  document.getElementById('results-area').innerHTML = `<div class="result-cards">${cards}</div>`;
+}
+
+// ── Formatters ───────────────────────────────────────────────────────────────────────────
+function modeLabel(m) {
+  return { sea: '🚢 Sea', air: '✈️ Air', truck: '🚛 Truck' }[m];
+}
+function fmtKm(v) {
+  if (v == null) return '–';
+  return v >= 1000 ? (v/1000).toFixed(1) + ' k km' : v.toFixed(0) + ' km';
+}
+function fmtDays(v) {
+  if (v == null) return '–';
+  return v < 1 ? '<1 day' : v.toFixed(1) + ' d';
+}
+function fmtCO2(v) {
+  if (v == null) return '–';
+  return v >= 1000 ? (v/1000).toFixed(2) + ' t' : v.toFixed(1) + ' kg';
+}
+function fmtCost(v) {
+  if (v == null) return '–';
+  if (v >= 1e6) return '$' + (v/1e6).toFixed(2) + 'M';
+  if (v >= 1000) return '$' + (v/1000).toFixed(1) + 'k';
+  return '$' + v.toFixed(2);
+}
+function showError(msg) {
+  document.getElementById('results-area').innerHTML = `<p class="error-msg">⚠ ${msg}</p>`;
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────────────────
+loadPorts();
+</script>
+</body>
+</html>

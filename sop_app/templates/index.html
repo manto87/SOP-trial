@@ -214,6 +214,26 @@
   .toggle-btn { padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: none; color: var(--text2); transition: all .15s; }
   .toggle-btn.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 
+  /* ── E2E Risk Tab ────────────────────────────────────────────────── */
+  .risk-drop-zone { border: 2px dashed var(--border); border-radius: 12px; padding: 48px 32px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s; }
+  .risk-drop-zone:hover, .risk-drop-zone.dragover { border-color: var(--accent); background: rgba(79,142,247,.05); }
+  .risk-drop-zone.loaded { border-color: var(--success); background: rgba(16,185,129,.05); }
+  .risk-col-hint { display: inline-flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 14px; }
+  .risk-col-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 3px 12px; font-size: 11px; font-weight: 600; color: var(--text2); }
+  .risk-col-chip.required { border-color: var(--accent); color: var(--accent); }
+  .risk-flag { display: inline-block; width: 18px; height: 18px; border-radius: 50%; font-size: 10px; font-weight: 700; line-height: 18px; text-align: center; }
+  .risk-flag-on  { background: rgba(239,68,68,.2); color: var(--danger); }
+  .risk-flag-off { background: var(--surface2); color: var(--text3); }
+  .risk-score-3 { color: var(--danger); font-weight: 700; }
+  .risk-score-2 { color: var(--danger); }
+  .risk-score-1 { color: var(--warning); }
+  .risk-score-0 { color: var(--text3); }
+  .badge-risk-3 { background: rgba(239,68,68,.2); color: var(--danger); border: 1px solid rgba(239,68,68,.3); font-weight: 700; }
+  .badge-risk-2 { background: rgba(239,68,68,.12); color: var(--danger); }
+  .badge-risk-1 { background: rgba(245,158,11,.15); color: var(--warning); }
+  .badge-risk-0 { background: rgba(100,116,139,.12); color: var(--text3); }
+  .risk-filter-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
   /* SCROLLBAR */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -291,6 +311,7 @@
   <button class="nav-btn" onclick="switchTab('suppliers')">🚚 Suppliers & Risk</button>
   <button class="nav-btn" onclick="switchTab('knowledge')">🧠 Planner Knowledge</button>
   <button class="nav-btn" onclick="switchTab('analytics')">💬 Analytics</button>
+  <button class="nav-btn" onclick="switchTab('risk')">⚠️ E2E Risk</button>
 </div>
 
 <div class="main">
@@ -499,6 +520,7 @@
     <button class="cap-view-btn active" id="bom-mode-structure" onclick="setBomMode('structure')">🌳 Structure</button>
     <button class="cap-view-btn" id="bom-mode-shortage" onclick="setBomMode('shortage')">⚠ Shortage Impact</button>
     <button class="cap-view-btn" id="bom-mode-peg" onclick="setBomMode('peg')">📦 Build Peg</button>
+    <button class="cap-view-btn" id="bom-mode-import" onclick="setBomMode('import')">📥 Import BOM</button>
     <span id="bom-mode-hint" style="font-size:11px;color:var(--text3);margin-left:8px">Explore BOM structure and plan data</span>
   </div>
 
@@ -544,6 +566,103 @@
       </div>
       <!-- Impact list -->
       <div id="shortage-impact-list"></div>
+    </div>
+  </div>
+
+  <!-- ── Import BOM mode ────────────────────────────────────────────── -->
+  <div id="bom-panel-import" style="display:none">
+
+    <div class="grid-2" style="align-items:start">
+
+      <!-- Left: upload + options -->
+      <div class="card">
+        <div class="card-header" style="margin-bottom:16px">
+          <div>
+            <div class="card-title">📥 Import BOM da Excel</div>
+            <div class="card-subtitle">Sostituisce o integra le righe esistenti nella tabella bill_of_materials</div>
+          </div>
+          <a href="/api/bom/export" class="btn btn-secondary btn-sm" style="text-decoration:none">⬇ Esporta BOM attuale</a>
+        </div>
+
+        <!-- Drop zone -->
+        <div id="bom-import-dropzone" class="risk-drop-zone"
+             ondragover="event.preventDefault();this.classList.add('dragover')"
+             ondragleave="this.classList.remove('dragover')"
+             ondrop="bomImportDrop(event)"
+             onclick="document.getElementById('bom-import-file').click()">
+          <div style="font-size:32px;margin-bottom:8px">📂</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">Drop Excel o clicca per sfogliare</div>
+          <div style="font-size:12px;color:var(--text2)">Formato .xlsx — colonne: <code>parent_id</code>, <code>child_id</code>, <code>quantity</code> [, <code>bom_level</code>]</div>
+        </div>
+        <input type="file" id="bom-import-file" accept=".xlsx,.xls" style="display:none" onchange="bomImportPickFile(this)">
+
+        <!-- Mode selector -->
+        <div style="margin-top:20px">
+          <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px">Modalità di import</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)" id="bom-mode-label-replace_products">
+              <input type="radio" name="bom-import-mode" value="replace_products" checked style="margin-top:2px;accent-color:var(--accent)">
+              <div>
+                <div style="font-size:13px;font-weight:600;color:var(--text)">Replace Products <span class="badge badge-info" style="font-size:10px">consigliato</span></div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">Elimina e riscrive solo i parent_id presenti nel file. Gli altri rimangono intatti.</div>
+              </div>
+            </label>
+            <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)" id="bom-mode-label-merge">
+              <input type="radio" name="bom-import-mode" value="merge" style="margin-top:2px;accent-color:var(--accent)">
+              <div>
+                <div style="font-size:13px;font-weight:600;color:var(--text)">Merge</div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">Aggiorna solo i legami (parent, child) presenti nel file. Gli altri restano.</div>
+              </div>
+            </label>
+            <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)" id="bom-mode-label-replace_all">
+              <input type="radio" name="bom-import-mode" value="replace_all" style="margin-top:2px;accent-color:var(--accent)">
+              <div>
+                <div style="font-size:13px;font-weight:600;color:var(--text)">Replace All <span class="badge badge-danger" style="font-size:10px">distruttivo</span></div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">Svuota l'intera tabella BOM e la ricostruisce dal file.</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Status line -->
+        <div id="bom-import-status" style="margin-top:16px;font-size:13px;min-height:20px;color:var(--text2)"></div>
+
+        <!-- Confirm button (hidden until preview ok) -->
+        <button id="bom-import-confirm-btn" onclick="bomImportConfirm()"
+                style="display:none;margin-top:16px;width:100%"
+                class="btn btn-primary">✓ Conferma Import</button>
+      </div>
+
+      <!-- Right: preview + warnings -->
+      <div>
+        <div class="card" id="bom-import-preview-card" style="display:none">
+          <div class="card-header" style="margin-bottom:12px">
+            <div class="card-title">Anteprima</div>
+            <div id="bom-import-preview-stats" style="font-size:12px;color:var(--text2)"></div>
+          </div>
+
+          <!-- Warnings/errors -->
+          <div id="bom-import-messages" style="margin-bottom:12px"></div>
+
+          <!-- Preview table -->
+          <div class="table-wrap" style="max-height:360px;overflow-y:auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>parent_id</th>
+                  <th>child_id</th>
+                  <th class="num">quantity</th>
+                  <th class="num">bom_level</th>
+                  <th style="font-size:10px;color:var(--text3)">fonte livello</th>
+                </tr>
+              </thead>
+              <tbody id="bom-import-preview-body"></tbody>
+            </table>
+          </div>
+          <div id="bom-import-preview-more" style="font-size:11px;color:var(--text3);margin-top:8px;text-align:right"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -894,6 +1013,150 @@
   </div>
 </div>
 
+<!-- ── E2E Risk Tab ────────────────────────────────────────────────────────── -->
+<div id="tab-risk" class="tab-panel">
+
+  <!-- Upload card -->
+  <div class="card" style="margin-bottom:24px">
+    <div class="card-header" style="margin-bottom:20px">
+      <div>
+        <div class="card-title">⚠️ Slow-Moving Inventory Risk</div>
+        <div class="card-subtitle">Identifica i componenti concentrati su pochi clienti o BOM che rischiano di diventare slow-moving in caso di calo della domanda</div>
+      </div>
+    </div>
+
+    <div class="grid-2" style="gap:20px;margin-bottom:20px">
+      <!-- Sales file -->
+      <div>
+        <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:8px">1. Dati Vendite</div>
+        <div id="risk-dz-sales" class="risk-drop-zone"
+             ondragover="event.preventDefault();this.classList.add('dragover')"
+             ondragleave="this.classList.remove('dragover')"
+             ondrop="riskDropSales(event)"
+             onclick="document.getElementById('risk-file-sales').click()"
+             style="padding:28px 20px">
+          <div style="font-size:26px;margin-bottom:6px">📊</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">Vendite per cliente × prodotto × mese</div>
+          <div class="risk-col-hint" style="margin-top:8px">
+            <span class="risk-col-chip required">customer *</span>
+            <span class="risk-col-chip required">product_id *</span>
+            <span class="risk-col-chip required">month *</span>
+            <span class="risk-col-chip required">quantity *</span>
+          </div>
+        </div>
+        <input type="file" id="risk-file-sales" accept=".xlsx,.xls" style="display:none" onchange="riskPickSales(this)">
+        <div id="risk-status-sales" style="margin-top:8px;font-size:12px;color:var(--text2);min-height:16px"></div>
+      </div>
+
+      <!-- Inventory file -->
+      <div>
+        <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:8px">2. Inventario & Safety Stock</div>
+        <div id="risk-dz-inv" class="risk-drop-zone"
+             ondragover="event.preventDefault();this.classList.add('dragover')"
+             ondragleave="this.classList.remove('dragover')"
+             ondrop="riskDropInv(event)"
+             onclick="document.getElementById('risk-file-inv').click()"
+             style="padding:28px 20px">
+          <div style="font-size:26px;margin-bottom:6px">📦</div>
+          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">Giacenza e scorta di sicurezza per item</div>
+          <div class="risk-col-hint" style="margin-top:8px">
+            <span class="risk-col-chip required">item_id *</span>
+            <span class="risk-col-chip required">inventory *</span>
+            <span class="risk-col-chip required">safety_stock *</span>
+            <span class="risk-col-chip">unit_cost</span>
+            <span class="risk-col-chip">supplier</span>
+          </div>
+        </div>
+        <input type="file" id="risk-file-inv" accept=".xlsx,.xls" style="display:none" onchange="riskPickInv(this)">
+        <div id="risk-status-inv" style="margin-top:8px;font-size:12px;color:var(--text2);min-height:16px"></div>
+      </div>
+    </div>
+
+    <!-- Threshold + run -->
+    <div style="display:flex;align-items:center;gap:16px;padding-top:16px;border-top:1px solid var(--border);flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:8px">
+        <label style="font-size:13px;color:var(--text2)">Flag componenti in ≤</label>
+        <input type="number" id="risk-bom-threshold" value="2" min="1" max="10"
+               style="width:56px;padding:6px 8px;font-size:13px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);text-align:center">
+        <label style="font-size:13px;color:var(--text2)">prodotti finiti</label>
+      </div>
+      <button id="risk-run-btn" class="btn btn-primary" onclick="riskRunAnalysis()" disabled
+              style="opacity:.5;transition:opacity .2s">▶ Analizza</button>
+      <div id="risk-upload-status" style="font-size:12px;color:var(--text2);flex:1;text-align:right"></div>
+    </div>
+  </div>
+
+  <!-- Results — hidden until analysis runs -->
+  <div id="risk-results" style="display:none">
+
+    <!-- KPI strip -->
+    <div class="kpi-grid" id="risk-kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(175px,1fr));margin-bottom:20px"></div>
+
+    <!-- Charts row -->
+    <div class="grid-2" style="margin-bottom:20px">
+      <div class="card">
+        <div class="card-header" style="margin-bottom:12px">
+          <div class="card-title">Top Componenti — Valore Slow-Moving</div>
+          <div style="font-size:11px;color:var(--text3)">eccesso su safety stock × unit cost · colorato per risk score</div>
+        </div>
+        <div class="chart-wrap tall"><canvas id="risk-bar-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-header" style="margin-bottom:12px">
+          <div class="card-title">Concentrazione: Clienti vs BOM</div>
+          <div style="font-size:11px;color:var(--text3)">dimensione bolla = valore slow-moving · colore = risk score</div>
+        </div>
+        <div class="chart-wrap tall"><canvas id="risk-bubble-chart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Risk table -->
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Component Risk Register</div>
+          <div id="risk-table-subtitle" class="card-subtitle"></div>
+        </div>
+        <div class="risk-filter-bar">
+          <label style="font-size:12px;color:var(--text2)">Min score</label>
+          <select id="risk-score-filter" onchange="riskApplyFilter()"
+                  style="padding:5px 8px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+            <option value="0">Tutti</option>
+            <option value="1" selected>≥ 1 flag</option>
+            <option value="2">Entrambi i flag</option>
+          </select>
+          <input id="risk-search" type="text" placeholder="Cerca componente…" oninput="riskApplyFilter()"
+                 style="padding:5px 10px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);width:180px">
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Nome</th>
+              <th style="text-align:center">Score</th>
+              <th style="text-align:center">Flag</th>
+              <th class="num">Clienti</th>
+              <th class="num">FG (BOM)</th>
+              <th class="num">On Hand</th>
+              <th class="num">Safety Stock</th>
+              <th class="num">Eccesso</th>
+              <th class="num">Cons. media/mese</th>
+              <th class="num">Copertura</th>
+              <th class="num">Valore SL</th>
+              <th>Fornitore</th>
+            </tr>
+          </thead>
+          <tbody id="risk-table-body"></tbody>
+        </table>
+      </div>
+      <div id="risk-table-footer" style="font-size:11px;color:var(--text3);padding:10px 0 0;text-align:right"></div>
+    </div>
+
+  </div><!-- /risk-results -->
+</div><!-- /tab-risk -->
+
 </div><!-- /main -->
 
 <!-- ── Floating Chat Bubble ────────────────────────────────────────────────── -->
@@ -996,7 +1259,9 @@ let state = {
   sankeyView: 'revenue',
   suppliersData: null,
   currentRunId: null,
-  charts: {}
+  charts: {},
+  riskInitialized: false,
+  riskData: null,
 };
 
 // ── UTILS ────────────────────────────────────────────────────────────────────
@@ -1034,6 +1299,9 @@ function switchTab(name) {
   if (name === 'analytics') {
     setTimeout(() => document.getElementById('analytics-input').focus(), 50);
     _initAnalyticsBanner();
+  }
+  if (name === 'risk' && !state.riskInitialized) {
+    state.riskInitialized = true;
   }
 }
 
@@ -2775,16 +3043,17 @@ function showBOMPlan(itemId, itemName, e) {
 // ── BOM MODE TOGGLE ──────────────────────────────────────────────────────────
 
 function setBomMode(mode) {
-  ['structure','shortage','peg'].forEach(m => {
+  ['structure','shortage','peg','import'].forEach(m => {
     document.getElementById(`bom-panel-${m}`).style.display = m === mode ? '' : 'none';
     document.getElementById(`bom-mode-${m}`).classList.toggle('active', m === mode);
   });
   const hints = {
     structure: 'Explore BOM structure and plan data',
-    shortage: 'See which components are short and which FGs are affected',
-    peg: 'Enter a production quantity and date to trace exact material requirements',
+    shortage:  'See which components are short and which FGs are affected',
+    peg:       'Enter a production quantity and date to trace exact material requirements',
+    import:    'Upload Excel to add or replace BOM rows — bom_level auto-calculated',
   };
-  document.getElementById('bom-mode-hint').textContent = hints[mode];
+  document.getElementById('bom-mode-hint').textContent = hints[mode] || '';
   if (mode === 'shortage') loadShortageImpact();
   if (mode === 'peg') initBuildPeg();
 }
@@ -5479,6 +5748,416 @@ function buildAnalyticsTable(columns, rows) {
 
 function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── BOM Import ────────────────────────────────────────────────────────────────
+
+let _bomImportParsed = null;  // last preview result
+
+function bomImportDrop(e) {
+  e.preventDefault();
+  document.getElementById('bom-import-dropzone').classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) _bomImportProcess(file);
+}
+
+function bomImportPickFile(input) {
+  if (input.files[0]) _bomImportProcess(input.files[0]);
+}
+
+async function _bomImportProcess(file) {
+  const status  = document.getElementById('bom-import-status');
+  const preview = document.getElementById('bom-import-preview-card');
+  const confirm = document.getElementById('bom-import-confirm-btn');
+  const dz      = document.getElementById('bom-import-dropzone');
+
+  _bomImportParsed = null;
+  preview.style.display = 'none';
+  confirm.style.display = 'none';
+  dz.classList.remove('loaded');
+
+  status.style.color   = 'var(--accent)';
+  status.textContent   = '⟳ Analisi file…';
+
+  const fd = new FormData();
+  fd.append('file', file);
+
+  try {
+    const res  = await fetch('/api/bom/import?preview=1', { method: 'POST', body: fd });
+    const data = await res.json();
+
+    if (!data.ok && !data.rows_valid) {
+      // Hard error (e.g. cycle or unreadable file)
+      status.style.color = 'var(--danger)';
+      status.textContent = '❌ ' + (data.message || 'Errore sconosciuto');
+      return;
+    }
+
+    _bomImportParsed = { file, data };
+    _bomRenderPreview(data);
+
+    if (data.ok) {
+      dz.classList.add('loaded');
+      status.style.color = 'var(--success)';
+      status.textContent = `✓ ${data.rows_valid} righe valide · ${data.rows_warned} con warning · ${data.rows_errored} errori · ${data.levels_computed} livelli calcolati automaticamente`;
+      confirm.style.display = '';
+    } else {
+      status.style.color = 'var(--danger)';
+      status.textContent = '❌ ' + data.message;
+      confirm.style.display = 'none';
+    }
+
+  } catch (err) {
+    status.style.color = 'var(--danger)';
+    status.textContent = '❌ ' + err.message;
+  }
+}
+
+function _bomRenderPreview(data) {
+  const card = document.getElementById('bom-import-preview-card');
+  const stats = document.getElementById('bom-import-preview-stats');
+  const msgs  = document.getElementById('bom-import-messages');
+  const tbody = document.getElementById('bom-import-preview-body');
+  const more  = document.getElementById('bom-import-preview-more');
+
+  card.style.display = '';
+
+  stats.textContent = `${data.rows_valid} righe valide su ${data.rows_parsed} lette`;
+
+  // Errors + warnings
+  let html = '';
+  if (data.errors && data.errors.length) {
+    html += `<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:12px">
+      <div style="font-weight:600;color:var(--danger);margin-bottom:6px">❌ Errori (righe scartate)</div>
+      ${data.errors.slice(0,5).map(e => `<div style="color:var(--text2)">Riga ${e.row}: ${e.msgs.join(' · ')}</div>`).join('')}
+      ${data.errors.length > 5 ? `<div style="color:var(--text3);margin-top:4px">…e altri ${data.errors.length - 5}</div>` : ''}
+    </div>`;
+  }
+  if (data.warnings && data.warnings.length) {
+    html += `<div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:12px">
+      <div style="font-weight:600;color:var(--warning);margin-bottom:6px">⚠ Warning (righe importate comunque)</div>
+      ${data.warnings.slice(0,5).map(w => `<div style="color:var(--text2)">Riga ${w.row}: ${w.msgs.join(' · ')}</div>`).join('')}
+      ${data.warnings.length > 5 ? `<div style="color:var(--text3);margin-top:4px">…e altri ${data.warnings.length - 5}</div>` : ''}
+    </div>`;
+  }
+  if (!html) {
+    html = `<div style="font-size:12px;color:var(--success);margin-bottom:8px">✓ Nessun errore o warning</div>`;
+  }
+  msgs.innerHTML = html;
+
+  // Preview table (first 50)
+  tbody.innerHTML = (data.preview || []).map(r => `<tr>
+    <td><code style="font-size:11px">${escHtml(r.parent_id)}</code></td>
+    <td><code style="font-size:11px">${escHtml(r.child_id)}</code></td>
+    <td class="num">${r.quantity}</td>
+    <td class="num">${r.bom_level}</td>
+    <td style="font-size:10px;color:var(--text3)">${r.bom_level !== undefined ? 'BFS' : 'file'}</td>
+  </tr>`).join('');
+
+  more.textContent = data.preview_total > 50
+    ? `Mostrando prime 50 di ${data.preview_total} righe`
+    : `${data.preview_total} righe totali`;
+}
+
+async function bomImportConfirm() {
+  if (!_bomImportParsed) return;
+
+  const mode   = document.querySelector('input[name="bom-import-mode"]:checked').value;
+  const status = document.getElementById('bom-import-status');
+  const btn    = document.getElementById('bom-import-confirm-btn');
+
+  const modeLabels = {
+    replace_all:      'Sostituisci TUTTA la BOM',
+    replace_products: 'Sostituisci i prodotti del file',
+    merge:            'Merge',
+  };
+  if (!confirm(`Confermi l'import in modalità "${modeLabels[mode]}"?\n\nVerranno scritte ${_bomImportParsed.data.rows_valid} righe nel database.`)) return;
+
+  btn.disabled    = true;
+  btn.textContent = '⟳ Scrittura…';
+  status.style.color  = 'var(--accent)';
+  status.textContent  = '⟳ Scrittura nel database…';
+
+  const fd = new FormData();
+  fd.append('file', _bomImportParsed.file);
+
+  try {
+    const res  = await fetch(`/api/bom/import?mode=${mode}`, { method: 'POST', body: fd });
+    const data = await res.json();
+
+    if (data.ok) {
+      status.style.color = 'var(--success)';
+      status.textContent = `✓ Import completato: ${data.imported} righe scritte in modalità "${modeLabels[mode]}"`;
+      btn.style.display = 'none';
+      document.getElementById('bom-import-dropzone').classList.remove('loaded');
+      _bomImportParsed = null;
+      // Invalidate BOM cache so Navigator reloads
+      state.bomData = null;
+    } else {
+      status.style.color = 'var(--danger)';
+      status.textContent = '❌ ' + data.message;
+      btn.disabled    = false;
+      btn.textContent = '✓ Conferma Import';
+    }
+  } catch (err) {
+    status.style.color = 'var(--danger)';
+    status.textContent = '❌ ' + err.message;
+    btn.disabled    = false;
+    btn.textContent = '✓ Conferma Import';
+  }
+}
+
+// ── E2E Risk Tab ──────────────────────────────────────────────────────────────
+
+let _riskSalesFile = null;
+let _riskInvFile   = null;
+
+function riskDropSales(e) {
+  e.preventDefault();
+  document.getElementById('risk-dz-sales').classList.remove('dragover');
+  if (e.dataTransfer.files[0]) _riskSetSales(e.dataTransfer.files[0]);
+}
+function riskPickSales(inp) { if (inp.files[0]) _riskSetSales(inp.files[0]); }
+
+function riskDropInv(e) {
+  e.preventDefault();
+  document.getElementById('risk-dz-inv').classList.remove('dragover');
+  if (e.dataTransfer.files[0]) _riskSetInv(e.dataTransfer.files[0]);
+}
+function riskPickInv(inp) { if (inp.files[0]) _riskSetInv(inp.files[0]); }
+
+function _riskSetSales(file) {
+  _riskSalesFile = file;
+  const st = document.getElementById('risk-status-sales');
+  st.style.color = 'var(--success)';
+  st.textContent = `✓ ${file.name}`;
+  document.getElementById('risk-dz-sales').classList.add('loaded');
+  _riskCheckReady();
+}
+
+function _riskSetInv(file) {
+  _riskInvFile = file;
+  const st = document.getElementById('risk-status-inv');
+  st.style.color = 'var(--success)';
+  st.textContent = `✓ ${file.name}`;
+  document.getElementById('risk-dz-inv').classList.add('loaded');
+  _riskCheckReady();
+}
+
+function _riskCheckReady() {
+  const btn = document.getElementById('risk-run-btn');
+  const ready = _riskSalesFile && _riskInvFile;
+  btn.disabled = !ready;
+  btn.style.opacity = ready ? '1' : '.5';
+}
+
+async function riskRunAnalysis() {
+  const st  = document.getElementById('risk-upload-status');
+  const res = document.getElementById('risk-results');
+  const thr = parseInt(document.getElementById('risk-bom-threshold').value, 10) || 2;
+
+  res.style.display = 'none';
+  st.style.color   = 'var(--accent)';
+  st.textContent   = '⟳ Analisi in corso…';
+
+  const fd = new FormData();
+  fd.append('file',           _riskSalesFile);
+  fd.append('inventory_file', _riskInvFile);
+  fd.append('bom_threshold',  thr);
+
+  try {
+    const r    = await fetch('/api/risk/component_exposure', { method: 'POST', body: fd });
+    const data = await r.json();
+
+    if (!data.ok) {
+      st.style.color = 'var(--danger)';
+      st.textContent = '❌ ' + data.message;
+      return;
+    }
+
+    state.riskData = data;
+    const k = data.kpis;
+    st.style.color = 'var(--success)';
+    st.textContent = `✓ ${k.rows_parsed.toLocaleString()} righe vendite · ${k.period_from} → ${k.period_to} · `
+                   + `${k.inv_items_matched} componenti trovati in inventario`;
+
+    res.style.display = 'block';
+    riskRenderKpis(k);
+    riskRenderCharts(data.components);
+    riskApplyFilter();
+
+  } catch (err) {
+    st.style.color = 'var(--danger)';
+    st.textContent = '❌ ' + err.message;
+  }
+}
+
+function riskRenderKpis(k) {
+  const f = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(0)+'K' : n.toLocaleString();
+  document.getElementById('risk-kpi-grid').innerHTML = [
+    { val: k.total_components_analysed,   label: 'Componenti analizzati',     cls: 'accent',   sub: 'tutti i livelli BOM' },
+    { val: k.single_customer_components,  label: 'Cliente unico',             cls: k.single_customer_components > 0 ? 'warning' : 'success', sub: 'flag C attivo' },
+    { val: k.few_bom_components,          label: `≤ ${k.bom_threshold_used} BOM`,  cls: k.few_bom_components > 0 ? 'warning' : 'success', sub: 'flag B attivo' },
+    { val: k.both_flags_components,       label: 'Entrambi i flag',           cls: k.both_flags_components > 0 ? 'danger' : 'success', sub: 'rischio massimo slow-moving' },
+    { val: '€' + f(k.total_excess_inventory_value), label: 'Valore Eccesso Inv.',
+      cls: k.total_excess_inventory_value > 0 ? 'danger' : 'success',         sub: 'eccesso su SS × costo unitario' },
+    { val: k.unique_customers,            label: 'Clienti nel file',          cls: 'accent',   sub: '' },
+  ].map(d => `<div class="kpi ${d.cls}">
+    <div class="kpi-label">${d.label}</div>
+    <div class="kpi-value">${d.val}</div>
+    ${d.sub ? `<div class="kpi-sub">${d.sub}</div>` : ''}
+  </div>`).join('');
+}
+
+function riskRenderCharts(components) {
+  destroyChart('risk-bar');
+  destroyChart('risk-bubble');
+
+  const scoreColors = ['#64748b', '#f59e0b', '#ef4444'];
+
+  // Bar: top 15 by slow_moving_value
+  const top15 = [...components].sort((a,b) => b.slow_moving_value - a.slow_moving_value).slice(0, 15);
+
+  state.charts['risk-bar'] = new Chart(document.getElementById('risk-bar-chart').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: top15.map(c => c.component_id),
+      datasets: [{
+        data:            top15.map(c => c.slow_moving_value),
+        backgroundColor: top15.map(c => (scoreColors[c.risk_score] || '#64748b') + 'cc'),
+        borderColor:     top15.map(c =>  scoreColors[c.risk_score] || '#64748b'),
+        borderWidth: 1, borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => {
+          const c = top15[ctx.dataIndex];
+          return [
+            `Valore SL: €${fmtK(c.slow_moving_value)}`,
+            `Eccesso: ${c.excess_inventory.toLocaleString()} pz`,
+            `Clienti: ${c.customers.slice(0,3).join(', ')}`,
+            `FG: ${c.fg_products.join(', ')}`,
+          ];
+        }}}
+      },
+      scales: {
+        x: { ticks: { color: '#94a3b8', font:{size:11} }, grid: { display:false } },
+        y: { ticks: { color: '#94a3b8', font:{size:11}, callback: v => '€'+fmtK(v) },
+             grid:  { color:'rgba(46,52,82,.5)' } }
+      }
+    }
+  });
+
+  // Bubble: x=n_customers, y=n_fg_products, r=slow_moving_value, color=risk_score
+  const maxSLV = Math.max(...components.map(c => c.slow_moving_value), 1);
+  const bubbleData = components
+    .filter(c => c.risk_score >= 1)
+    .map(c => ({
+      x:    c.n_customers,
+      y:    c.n_fg_products,
+      r:    Math.max(5, Math.sqrt(c.slow_moving_value / maxSLV) * 28),
+      _c:   c,
+    }));
+
+  const bubbleByScore = [1, 2].map(score => ({
+    label:           score === 2 ? 'Entrambi i flag' : '1 flag',
+    data:            bubbleData.filter(d => d._c.risk_score === score),
+    backgroundColor: (scoreColors[score] || '#64748b') + '88',
+    borderColor:     scoreColors[score] || '#64748b',
+    borderWidth: 1,
+  }));
+
+  state.charts['risk-bubble'] = new Chart(document.getElementById('risk-bubble-chart').getContext('2d'), {
+    type: 'bubble',
+    data: { datasets: bubbleByScore },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position:'bottom', labels:{ color:'#94a3b8', font:{size:11}, padding:12 } },
+        tooltip: { callbacks: { label: ctx => {
+          const c = ctx.raw._c;
+          return [
+            c.component_id + ' — ' + c.name,
+            `Clienti: ${c.n_customers}  FG: ${c.n_fg_products}`,
+            `Eccesso: ${c.excess_inventory.toLocaleString()} pz`,
+            `Valore SL: €${fmtK(c.slow_moving_value)}`,
+          ];
+        }}}
+      },
+      scales: {
+        x: { title:{ display:true, text:'N° Clienti', color:'#94a3b8', font:{size:11} },
+             ticks:{ color:'#94a3b8', font:{size:11}, stepSize:1 },
+             grid: { color:'rgba(46,52,82,.5)' } },
+        y: { title:{ display:true, text:'N° Prodotti Finiti (BOM)', color:'#94a3b8', font:{size:11} },
+             ticks:{ color:'#94a3b8', font:{size:11}, stepSize:1 },
+             grid: { color:'rgba(46,52,82,.5)' } }
+      }
+    }
+  });
+}
+
+function riskApplyFilter() {
+  if (!state.riskData) return;
+  const minScore = parseInt(document.getElementById('risk-score-filter').value, 10);
+  const search   = (document.getElementById('risk-search').value || '').toLowerCase().trim();
+  const filtered = state.riskData.components.filter(c => {
+    if (c.risk_score < minScore) return false;
+    if (search && !c.component_id.toLowerCase().includes(search) && !c.name.toLowerCase().includes(search)) return false;
+    return true;
+  });
+  const thr = state.riskData.kpis.bom_threshold_used;
+  document.getElementById('risk-table-subtitle').textContent =
+    `Flag C = unico cliente · Flag B = ≤ ${thr} prodotti finiti · Valore SL = (on hand − safety stock) × costo`;
+  riskRenderTable(filtered);
+}
+
+function riskRenderTable(components) {
+  const tbody  = document.getElementById('risk-table-body');
+  const footer = document.getElementById('risk-table-footer');
+
+  if (!components.length) {
+    tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:var(--text2);padding:40px">Nessun componente corrisponde al filtro</td></tr>';
+    footer.textContent = '';
+    return;
+  }
+
+  const scoreBadge = s => [
+    `<span class="badge badge-risk-0">0</span>`,
+    `<span class="badge badge-risk-1">1</span>`,
+    `<span class="badge badge-risk-2">2</span>`,
+  ][Math.min(s, 2)];
+
+  tbody.innerHTML = components.map(c => {
+    const flagC = `<span class="risk-flag ${c.flag_single_customer ? 'risk-flag-on' : 'risk-flag-off'}" title="Cliente unico">C</span>`;
+    const flagB = `<span class="risk-flag ${c.flag_few_boms ? 'risk-flag-on' : 'risk-flag-off'}" title="Poche BOM">B</span>`;
+    const cList = c.customers.slice(0,2).map(escHtml).join(', ') + (c.customers.length > 2 ? ` +${c.customers.length-2}` : '');
+    const pList = c.fg_products.join(', ');
+    const excessColor = c.excess_inventory > 0 ? 'var(--warning)' : 'var(--text3)';
+    const slvColor    = c.slow_moving_value > 0 && c.risk_score >= 1 ? 'var(--danger)' : 'var(--text)';
+    const coverage    = c.months_coverage != null ? c.months_coverage.toFixed(1) + ' m' : '—';
+    const noInv       = !c.in_inventory_file;
+
+    return `<tr${c.risk_score === 2 ? ' style="background:rgba(239,68,68,.04)"' : ''}>
+      <td><code style="font-size:11px;color:var(--text2)">${escHtml(c.component_id)}</code></td>
+      <td style="max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(c.name)}">${escHtml(c.name)}</td>
+      <td style="text-align:center">${scoreBadge(c.risk_score)}</td>
+      <td style="text-align:center"><div style="display:flex;gap:3px;justify-content:center">${flagC}${flagB}</div></td>
+      <td class="num">${c.n_customers}<br><small style="color:var(--text3);font-size:10px">${cList}</small></td>
+      <td class="num">${c.n_fg_products}<br><small style="color:var(--text3);font-size:10px">${escHtml(pList)}</small></td>
+      <td class="num"${noInv ? ' style="color:var(--text3)"' : ''}>${noInv ? '—' : c.inventory_on_hand.toLocaleString()}</td>
+      <td class="num"${noInv ? ' style="color:var(--text3)"' : ''}>${noInv ? '—' : c.safety_stock.toLocaleString()}</td>
+      <td class="num" style="color:${excessColor}">${noInv ? '—' : c.excess_inventory > 0 ? '+' + c.excess_inventory.toLocaleString() : '0'}</td>
+      <td class="num">${c.avg_monthly_consumption > 0 ? c.avg_monthly_consumption.toLocaleString() : '—'}</td>
+      <td class="num">${noInv ? '—' : coverage}</td>
+      <td class="num" style="color:${slvColor};font-weight:${c.risk_score===2&&c.slow_moving_value>0?'700':'400'}">${c.slow_moving_value > 0 ? '€' + fmtK(c.slow_moving_value) : '—'}</td>
+      <td style="font-size:11px;color:var(--text3);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(c.supplier || '—')}</td>
+    </tr>`;
+  }).join('');
+
+  footer.textContent = `${components.length} componente${components.length !== 1 ? 'i' : ''}`;
 }
 
 </script>
