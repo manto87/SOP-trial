@@ -184,7 +184,8 @@
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
 
   /* ── Map ── */
-  #map { flex: 1; z-index: 1; }
+  .map-wrapper { flex: 1; position: relative; display: flex; flex-direction: column; }
+  #map { flex: 1; min-height: 0; z-index: 1; }
 
   /* map marker labels */
   .marker-label {
@@ -302,7 +303,7 @@
   </div><!-- /panel -->
 
   <!-- Map container -->
-  <div style="flex:1;position:relative;">
+  <div class="map-wrapper">
     <div class="pick-banner" id="pick-banner">Click map to set origin</div>
     <div id="map"></div>
   </div>
